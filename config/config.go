@@ -274,7 +274,7 @@ func WriteDefault() error {
 		Hooks: HooksConfig{
 			GitSkipEnv:      "NAV_SKIP",
 			ClaudeTopK:      5,
-			ClaudeMinScore:  0.72,
+			ClaudeMinScore:  0.4,
 			ClaudeMaxTokens: 4000,
 		},
 	}
