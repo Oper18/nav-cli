@@ -22,6 +22,7 @@ CLI tool for parsing source code repositories into semantically rich, searchable
 - [Qdrant Integration](#qdrant-integration)
 - [Git Hook Integration](#git-hook-integration)
 - [Claude Code Integration](#claude-code-integration)
+- [Cursor Integration](#cursor-integration)
 - [Development](#development)
 
 ---
@@ -784,6 +785,14 @@ nav hook uninstall --type claude --project mokosh
 ```
 
 Removes the hook entry from `.claude/settings.json`. Does not touch the Qdrant index.
+
+---
+
+## Cursor Integration
+
+Cursor does not have a built-in `nav hook install --type cursor` command. Use project hooks under `.cursor/` instead.
+
+See **[cursor.md](cursor.md)** for install steps, indexing examples, and copy-paste hook files in [`examples/cursor/`](examples/cursor/).
 
 ---
 
