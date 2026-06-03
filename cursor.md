@@ -1,290 +1,94 @@
-# Cursor integration for nav
+# Cursor integration
 
-Use **nav** to keep a semantic index of your repository and wire it into **Cursor** via [project hooks](https://cursor.com/docs/hooks). On each prompt (or at session start), nav can search Qdrant for symbols relevant to what you are asking and surface that context to the agent.
-
-This guide covers install, first index, hook setup, daily use, and troubleshooting.
-
----
-
-## What you get
-
-| Piece | Role |
-|-------|------|
-| `nav index` | Parse the repo (tree-sitter), summarize symbols (OpenRouter), embed, store in Qdrant |
-| `nav search` | Natural-language lookup over indexed symbols |
-| `nav hook run --type claude` | Format top-K hits as a `<nav-context>` block (same path Claude Code uses) |
-| Cursor `.cursor/hooks.json` | Run nav when you send a prompt or start a session |
-
-nav does **not** ship a `nav hook install --type cursor` command yet. You copy the example files under [`examples/cursor/`](examples/cursor/) into your project’s `.cursor/` directory.
-
----
+nav can install a **Cursor project hook** that runs semantic search on every prompt and injects matching symbols into the agent context.
 
 ## Prerequisites
 
-- **Go 1.22+** (to build nav) or a prebuilt `nav` on your `PATH`
-- **Qdrant** (local Docker or Qdrant Cloud)
-- **OpenRouter API key** (LLM summaries + embeddings)
-- **jq** (hook scripts parse JSON from stdin)
-- **Cursor** with Hooks enabled (Settings → Hooks)
+- `nav` on your `PATH`
+- `nav init` completed and `OPENROUTER_API_KEY` in `~/.nav-cli/credentials`
+- Qdrant running (see [README](README.md#qdrant-integration))
+- Project indexed: `nav index <project> --path <repo-root>`
 
----
+## Install the Cursor hook
 
-## 1. Install nav
-
-### Option A — build from this repo
+From your repository root:
 
 ```bash
-git clone https://github.com/Oper18/nav-cli.git
-cd nav-cli
-go build -o nav ./cmd
-install -m 755 nav ~/.local/bin/nav   # or another directory on PATH
+nav hook install --type cursor --path .
 ```
 
-### Option B — install script
+Or pass the project name explicitly:
 
 ```bash
-cd nav-cli
-./install.sh   # builds nav and moves it to ~/.local/bin/
+nav hook install myapp --type cursor --path ~/work/myapp
 ```
 
-Confirm:
+This writes `.cursor/hooks.json` with a `beforeSubmitPrompt` entry that runs:
+
+```text
+nav hook run <project> --type cursor --top 5
+```
+
+### Global hook (all workspaces)
 
 ```bash
-nav --help
+nav hook install myapp --type cursor --global
 ```
 
----
+Installs into `~/.cursor/hooks.json` instead of the project `.cursor/` directory.
 
-## 2. Bootstrap config and credentials
+## Uninstall
 
 ```bash
-nav init
+nav hook uninstall --type cursor --path .
 ```
 
-This creates `~/.nav-cli/config.yaml` and `~/.nav-cli/credentials`.
+## How it works
 
-Edit **`~/.nav-cli/credentials`**:
+1. You send a prompt in Cursor Agent.
+2. Cursor invokes `nav hook run <project> --type cursor` and passes the prompt JSON on **stdin**.
+3. nav embeds the prompt, searches Qdrant, and builds a `<nav-context>` block (same formatter as Claude Code).
+4. nav prints a JSON response on **stdout**:
 
-```dotenv
-OPENROUTER_API_KEY=sk-or-...
-QDRANT_API_KEY=          # optional for local Qdrant without auth
-```
-
-Point Qdrant at your instance in **`~/.nav-cli/config.yaml`** (defaults are fine for local Docker on port 6334):
-
-```yaml
-qdrant:
-  host: localhost
-  port: 6334
-  use_tls: false
-```
-
-### Start Qdrant locally (example)
-
-```bash
-docker run -d --name qdrant \
-  -p 6333:6333 -p 6334:6334 \
-  -v ~/.nav-cli/qdrant_storage:/qdrant/storage \
-  qdrant/qdrant
-```
-
----
-
-## 3. Index your project (required before search/hooks help)
-
-Use your **project name** (logical id for the Qdrant collection `nav_<project>`) and the **repository root**:
-
-```bash
-cd ~/work/myapp
-nav index myapp --path .
-```
-
-Parser-only check (no LLM / no Qdrant writes):
-
-```bash
-nav index myapp --path . --dry-run
-```
-
-Force full reindex after changing embedding model:
-
-```bash
-nav index myapp --path . --force
-```
-
-Verify search:
-
-```bash
-nav search "where is authentication handled" myapp --top 5
-nav search "database migrations" myapp --json
-```
-
----
-
-## 4. Install Cursor hooks in your repo
-
-From your **application repository** (not necessarily the nav-cli clone):
-
-```bash
-mkdir -p .cursor/hooks
-cp /path/to/nav-cli/examples/cursor/hooks.json .cursor/
-cp /path/to/nav-cli/examples/cursor/nav-context.sh .cursor/hooks/
-chmod +x .cursor/hooks/nav-context.sh
-```
-
-Edit **`.cursor/hooks/nav-context.sh`** and set:
-
-```bash
-NAV_PROJECT="myapp"    # same name you passed to `nav index`
-```
-
-Ensure `nav` is on the `PATH` Cursor uses when it runs hooks (often the same as your login shell; `~/.local/bin` is a common install location).
-
-### What the example hook does
-
-1. Cursor calls **`beforeSubmitPrompt`** with JSON on stdin (`prompt`, `workspace_roots`, …).
-2. The script reads the prompt and runs:
-
-   ```bash
-   nav hook run "$NAV_PROJECT" --type claude --top 5 --query "$prompt"
+   ```json
+   {"continue": true, "additional_context": "<nav-context ...>...</nav-context>"}
    ```
 
-3. nav prints a **`<nav-context>`** block to stdout (symbols, scores, summaries, code snippets).
-4. The script returns **`{"continue": true}`** so your prompt is never blocked (fail-open).
+5. Cursor continues with the prompt; context is attached when supported by the hook runtime.
 
-Hook config (`.cursor/hooks.json`):
+If search fails (missing index, Qdrant down, API error), nav returns `{"continue": true}` so your prompt is never blocked.
 
-```json
-{
-  "version": 1,
-  "hooks": {
-    "beforeSubmitPrompt": [
-      {
-        "command": ".cursor/hooks/nav-context.sh",
-        "timeout": 15,
-        "failClosed": false
-      }
-    ]
-  }
-}
-```
-
-Paths are relative to the **project root** where `.cursor/hooks.json` lives.
-
-Reload: save `hooks.json` or restart Cursor. Confirm in **Settings → Hooks** or the **Hooks** output channel.
-
----
-
-## 5. Optional: session-start context
-
-If you want nav context once per chat instead of on every prompt, add a **`sessionStart`** hook (see [`examples/cursor/hooks-session-start.json`](examples/cursor/hooks-session-start.json) and [`nav-session-start.sh`](examples/cursor/nav-session-start.sh)).
-
-`sessionStart` supports **`additional_context`** in hook output more reliably than `beforeSubmitPrompt` in current Cursor builds. You can use both hooks together: session overview at start, per-prompt search on submit.
-
----
-
-## 6. Cursor vs Claude Code hooks
-
-| | Claude Code | Cursor (this guide) |
-|---|-------------|---------------------|
-| Install | `nav hook install --type claude --project myapp` | Copy `examples/cursor/*` into `.cursor/` |
-| Config file | `.claude/settings.json` | `.cursor/hooks.json` |
-| Run nav | `nav hook run myapp --type claude --query "$CLAUDE_USER_PROMPT"` | Same command; prompt from hook stdin JSON |
-| Context injection | Supported via `UserPromptSubmit` | **`beforeSubmitPrompt`**: nav runs and logs; full prompt injection is limited in current Cursor versions — prefer **`sessionStart`** + `additional_context` for stable injection |
-
-Git pre-commit indexing is unchanged:
+## Manual test
 
 ```bash
-nav hook install --type git --path ~/work/myapp
+printf '%s\n' '{"prompt":"where is hook install implemented"}' \
+  | nav hook run nav-cli --type cursor --top 3
 ```
 
----
+## Configuration
 
-## 7. Daily workflow (examples)
-
-```bash
-# After a large refactor
-nav index myapp --path ~/work/myapp
-
-# Quick lookup from the terminal
-nav search "retry logic for API client" myapp --top 3
-
-# Skip nav on a WIP commit, sync later
-NAV_SKIP=1 git commit -m "wip"
-nav sync myapp --path ~/work/myapp --since HEAD~5
-```
-
-In Cursor: open the repo, send a normal agent prompt — the hook runs nav search in the background. Check the Hooks output channel if results look empty (usually missing index or API keys).
-
----
-
-## 8. Manual hook test (no Cursor UI)
-
-From the project root:
-
-```bash
-printf '%s\n' '{"prompt":"where is the index command implemented","workspace_roots":["/home/you/work/myapp"]}' \
-  | .cursor/hooks/nav-context.sh
-```
-
-Expect exit code `0` and JSON like:
-
-```json
-{"continue": true}
-```
-
-Run nav directly to see the context block:
-
-```bash
-nav hook run myapp --type claude --top 5 --query "where is the index command implemented"
-```
-
----
-
-## 9. Configuration knobs
-
-In `~/.nav-cli/config.yaml`:
+Cursor hooks reuse the Claude hook settings in `~/.nav-cli/config.yaml`:
 
 ```yaml
 hooks:
-  claude_top_k: 5           # default top-K for `nav hook run --type claude`
-  claude_min_score: 0.72    # drop weak matches
-  claude_max_tokens: 4000   # cap injected text size
+  claude_top_k: 5
+  claude_min_score: 0.72
+  claude_max_tokens: 4000
 ```
 
-Override per invocation:
+Override top-K at install time via config, or pass `--top` when running manually:
 
 ```bash
-nav hook run myapp --type claude --top 3 --query "payment webhook"
+nav hook run myapp --type cursor --top 10 --query "authentication middleware"
 ```
 
----
+## Related commands
 
-## 10. Troubleshooting
+| Command | Purpose |
+|---------|---------|
+| `nav index <project> --path .` | Build / refresh the semantic index |
+| `nav search "<query>" <project>` | Search from the terminal |
+| `nav hook install --type git --path .` | Keep index updated on commit |
+| `nav hook install --type claude` | Same search injection for Claude Code |
 
-| Symptom | Fix |
-|---------|-----|
-| `Missing Authentication header` on index/search | Set `OPENROUTER_API_KEY` in `~/.nav-cli/credentials` |
-| Qdrant connection refused | Start Qdrant; match `host`/`port` in config |
-| Hook never runs | Valid `.cursor/hooks.json`; script executable; restart Cursor |
-| Empty search / no context | Run `nav index <project> --path <repo>` first |
-| Indexing entire home directory by mistake | Always pass `--path` to a single repo root |
-| `nav: command not found` in hook | Use full path in script or add `~/.local/bin` to PATH for GUI apps |
-
----
-
-## 11. Uninstall Cursor hooks
-
-```bash
-rm .cursor/hooks.json .cursor/hooks/nav-context.sh
-# optional: rmdir .cursor/hooks .cursor if empty
-```
-
-This does not delete the Qdrant index. To remove indexed data, delete the collection in Qdrant or reindex after clearing.
-
----
-
-## Related docs
-
-- [README.md](README.md) — full nav architecture and commands
-- [Claude Code integration](README.md#claude-code-integration) — `nav hook install --type claude`
-- [Cursor Hooks documentation](https://cursor.com/docs/hooks)
+See [README.md](README.md) for full architecture and API reference.
