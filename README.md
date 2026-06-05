@@ -22,6 +22,7 @@ CLI tool for parsing source code repositories into semantically rich, searchable
 - [Qdrant Integration](#qdrant-integration)
 - [Git Hook Integration](#git-hook-integration)
 - [Claude Code Integration](#claude-code-integration)
+- [Cursor Integration](#cursor-integration)
 - [Development](#development)
 
 ---
@@ -146,7 +147,8 @@ nav/
 │   │
 │   ├── hook/
 │   │   ├── git.go                 # install/uninstall/run git pre-commit hook
-│   │   └── claude.go              # install/uninstall/run Claude Code hook
+│   │   ├── claude.go              # install/uninstall/run Claude Code hook
+│   │   └── cursor.go              # install/uninstall/run Cursor hooks.json hook
 │   │
 │   └── config/
 │       └── config.go              # load/save ~/.nav-cli/config.yaml via viper
@@ -459,15 +461,18 @@ nav sync --project mokosh --path ~/work/mokosh --since HEAD~10
 
 ### `nav hook`
 
-Manage git and Claude Code hook installation.
+Manage git, Claude Code, and Cursor hook installation.
 
 ```
-nav hook install   --type git    --project <name> --path <repo-root>
-nav hook install   --type claude --project <name>
+nav hook install   --type git    --path <repo-root>
+nav hook install   --type claude [project]
+nav hook install   --type cursor --path <repo-root> [project]
 nav hook uninstall --type git    --path <repo-root>
-nav hook uninstall --type claude --project <name>
-nav hook run       --type git    --path <repo-root>   # called by the hook itself
-nav hook run       --type claude --query <text>        # called by the Claude hook
+nav hook uninstall --type claude
+nav hook uninstall --type cursor --path <repo-root>
+nav hook run       --type git    --path <repo-root>
+nav hook run       --type claude --query <text>
+nav hook run       --type cursor --top <n>             # reads prompt from stdin
 ```
 
 ---
@@ -784,6 +789,18 @@ nav hook uninstall --type claude --project mokosh
 ```
 
 Removes the hook entry from `.claude/settings.json`. Does not touch the Qdrant index.
+
+---
+
+## Cursor Integration
+
+Install a `beforeSubmitPrompt` hook that runs semantic search on each prompt:
+
+```bash
+nav hook install --type cursor --path ~/work/myapp
+```
+
+See **[cursor.md](cursor.md)** for setup, behaviour, and examples.
 
 ---
 

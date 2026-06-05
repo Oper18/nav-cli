@@ -20,7 +20,7 @@ import (
 
 var hookCmd = &cobra.Command{
 	Use:   "hook",
-	Short: "Manage git and Claude Code hook installation",
+	Short: "Manage git, Claude Code, and Cursor hook installation",
 }
 
 // ---------------------------------------------------------------------------
@@ -35,8 +35,8 @@ var (
 
 var hookInstallCmd = &cobra.Command{
 	Use:   "install [project]",
-	Short: "Install a nav hook (git pre-commit or Claude Code)",
-	Long: "Install a nav hook (git pre-commit or Claude Code).\n\n" +
+	Short: "Install a nav hook (git, Claude Code, or Cursor)",
+	Long: "Install a nav hook (git pre-commit, Claude Code, or Cursor).\n\n" +
 		"The project name is optional: when omitted, the current directory must be a\n" +
 		"git repository and its basename is used as the project name.",
 	Args: cobra.MaximumNArgs(1),
@@ -44,9 +44,9 @@ var hookInstallCmd = &cobra.Command{
 }
 
 func init() {
-	hookInstallCmd.Flags().StringVar(&hookInstallType, "type", "", `Hook type: "git" or "claude" (required)`)
-	hookInstallCmd.Flags().StringVar(&hookInstallPath, "path", ".", "Repository path (for git hooks)")
-	hookInstallCmd.Flags().BoolVar(&hookInstallGlobal, "global", false, "Use ~/.claude/settings.json instead of ./.claude/settings.json")
+	hookInstallCmd.Flags().StringVar(&hookInstallType, "type", "", `Hook type: "git", "claude", or "cursor" (required)`)
+	hookInstallCmd.Flags().StringVar(&hookInstallPath, "path", ".", "Repository path (for git and cursor hooks)")
+	hookInstallCmd.Flags().BoolVar(&hookInstallGlobal, "global", false, "Use global config (~/.claude/settings.json or ~/.cursor/hooks.json)")
 
 	_ = hookInstallCmd.MarkFlagRequired("type")
 }
@@ -89,8 +89,29 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("nav Claude hook installed in %s\n", settingsPath)
 
+	case "cursor":
+		project, _, err := resolveProject(args, hookInstallPath)
+		if err != nil {
+			return err
+		}
+		var hooksPath string
+		if hookInstallGlobal {
+			hooksPath = hook.GlobalCursorHooksPath()
+		} else {
+			dir := hookInstallPath
+			if dir == "" {
+				dir = "."
+			}
+			hooksPath = hook.DefaultCursorHooksPath(dir)
+		}
+		topK := cfg.Hooks.ClaudeTopK
+		if err := hook.InstallCursor(hooksPath, project, topK); err != nil {
+			return fmt.Errorf("installing Cursor hook: %w", err)
+		}
+		fmt.Printf("nav Cursor hook installed in %s\n", hooksPath)
+
 	default:
-		return fmt.Errorf("unknown hook type %q; must be \"git\" or \"claude\"", hookInstallType)
+		return fmt.Errorf("unknown hook type %q; must be \"git\", \"claude\", or \"cursor\"", hookInstallType)
 	}
 	return nil
 }
@@ -112,9 +133,9 @@ var hookUninstallCmd = &cobra.Command{
 }
 
 func init() {
-	hookUninstallCmd.Flags().StringVar(&hookUninstallType, "type", "", `Hook type: "git" or "claude" (required)`)
+	hookUninstallCmd.Flags().StringVar(&hookUninstallType, "type", "", `Hook type: "git", "claude", or "cursor" (required)`)
 	hookUninstallCmd.Flags().StringVar(&hookUninstallPath, "path", ".", "Repository / settings path")
-	hookUninstallCmd.Flags().BoolVar(&hookUninstallGlobal, "global", false, "Use ~/.claude/settings.json")
+	hookUninstallCmd.Flags().BoolVar(&hookUninstallGlobal, "global", false, "Use global config (~/.claude/settings.json or ~/.cursor/hooks.json)")
 
 	_ = hookUninstallCmd.MarkFlagRequired("type")
 }
@@ -147,8 +168,24 @@ func runHookUninstall(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("nav Claude hook removed from %s\n", settingsPath)
 
+	case "cursor":
+		var hooksPath string
+		if hookUninstallGlobal {
+			hooksPath = hook.GlobalCursorHooksPath()
+		} else {
+			dir := hookUninstallPath
+			if dir == "" {
+				dir = "."
+			}
+			hooksPath = hook.DefaultCursorHooksPath(dir)
+		}
+		if err := hook.UninstallCursor(hooksPath); err != nil {
+			return fmt.Errorf("uninstalling Cursor hook: %w", err)
+		}
+		fmt.Printf("nav Cursor hook removed from %s\n", hooksPath)
+
 	default:
-		return fmt.Errorf("unknown hook type %q; must be \"git\" or \"claude\"", hookUninstallType)
+		return fmt.Errorf("unknown hook type %q; must be \"git\", \"claude\", or \"cursor\"", hookUninstallType)
 	}
 	return nil
 }
@@ -172,10 +209,10 @@ var hookRunCmd = &cobra.Command{
 }
 
 func init() {
-	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git" or "claude" (required)`)
+	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git", "claude", or "cursor" (required)`)
 	hookRunCmd.Flags().StringVar(&hookRunPath, "path", ".", "Repository path (for git hooks)")
-	hookRunCmd.Flags().IntVar(&hookRunTop, "top", 5, "Number of results to inject (for claude hooks)")
-	hookRunCmd.Flags().StringVar(&hookRunQuery, "query", "", "Query text (for claude hooks)")
+	hookRunCmd.Flags().IntVar(&hookRunTop, "top", 5, "Number of results to inject (for claude/cursor hooks)")
+	hookRunCmd.Flags().StringVar(&hookRunQuery, "query", "", "Query text (for claude/cursor hooks; cursor reads stdin when empty)")
 
 	_ = hookRunCmd.MarkFlagRequired("type")
 }
@@ -192,8 +229,15 @@ func runHookRun(cmd *cobra.Command, args []string) error {
 		}
 		return runHookRunClaude(project, hookRunQuery, hookRunTop)
 
+	case "cursor":
+		project, _, err := resolveProject(args, hookRunPath)
+		if err != nil {
+			return err
+		}
+		return runHookRunCursor(project, hookRunQuery, hookRunTop)
+
 	default:
-		return fmt.Errorf("unknown hook type %q; must be \"git\" or \"claude\"", hookRunType)
+		return fmt.Errorf("unknown hook type %q; must be \"git\", \"claude\", or \"cursor\"", hookRunType)
 	}
 }
 
@@ -260,13 +304,57 @@ func runHookRunClaude(project, query string, topK int) error {
 		return nil // nothing to do
 	}
 
+	block, err := buildNavContextBlock(project, query, topK)
+	if err != nil {
+		return err
+	}
+	fmt.Println(block)
+	return nil
+}
+
+// runHookRunCursor handles the Cursor beforeSubmitPrompt hook: reads the user
+// prompt from stdin (or --query), searches Qdrant, and writes a JSON response
+// with additional_context containing the formatted <nav-context> block.
+func runHookRunCursor(project, query string, topK int) error {
+	if query == "" {
+		prompt, err := hook.ReadCursorPromptFromStdin()
+		if err != nil {
+			return err
+		}
+		query = prompt
+	}
+
+	if query == "" {
+		fmt.Println(`{"continue":true}`)
+		return nil
+	}
+
+	block, err := buildNavContextBlock(project, query, topK)
+	if err != nil {
+		// Fail-open: never block prompt submission when search fails.
+		fmt.Fprintf(os.Stderr, "nav: warn: cursor hook search: %v\n", err)
+		fmt.Println(`{"continue":true}`)
+		return nil
+	}
+
+	out, err := hook.FormatCursorSubmitResponse(true, block)
+	if err != nil {
+		return err
+	}
+	fmt.Println(out)
+	return nil
+}
+
+// buildNavContextBlock embeds the query, searches Qdrant, and returns a
+// <nav-context> block shared by Claude and Cursor hook runners.
+func buildNavContextBlock(project, query string, topK int) (string, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return "", fmt.Errorf("loading config: %w", err)
 	}
 	creds, err := config.LoadCredentials()
 	if err != nil {
-		return fmt.Errorf("loading credentials: %w", err)
+		return "", fmt.Errorf("loading credentials: %w", err)
 	}
 
 	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
@@ -276,29 +364,28 @@ func runHookRunClaude(project, query string, topK int) error {
 
 	vecs, err := llmClient.EmbedQuery(ctx, cfg.Embedding.Model, cfg.Embedding.QueryInstruction, []string{query})
 	if err != nil {
-		return fmt.Errorf("embedding query: %w", err)
+		return "", fmt.Errorf("embedding query: %w", err)
 	}
 	if len(vecs) == 0 {
-		return fmt.Errorf("embedder returned no vectors")
+		return "", fmt.Errorf("embedder returned no vectors")
 	}
 
 	collection := "nav_" + project
 	if err := services.EnsureLocalQdrant(cfg); err != nil {
-		return fmt.Errorf("ensuring local qdrant: %w", err)
+		return "", fmt.Errorf("ensuring local qdrant: %w", err)
 	}
 	qdrantClient, err := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
 	if err != nil {
-		return fmt.Errorf("creating qdrant client: %w", err)
+		return "", fmt.Errorf("creating qdrant client: %w", err)
 	}
 	defer qdrantClient.Close()
 
 	results, err := qdrantClient.Search(ctx, collection, vecs[0], overFetch(topK), cfg.Hooks.ClaudeMinScore, nil)
 	if err != nil {
-		return fmt.Errorf("searching: %w", err)
+		return "", fmt.Errorf("searching: %w", err)
 	}
 	results = topN(collapseChunks(results), topK)
 
-	// Convert to hook.ContextResult.
 	ctxResults := make([]hook.ContextResult, 0, len(results))
 	for _, r := range results {
 		ctxResults = append(ctxResults, hook.ContextResult{
@@ -311,7 +398,5 @@ func runHookRunClaude(project, query string, topK int) error {
 		})
 	}
 
-	block := hook.FormatContextBlock(project, query, ctxResults, cfg.Hooks.ClaudeMaxTokens)
-	fmt.Println(block)
-	return nil
+	return hook.FormatContextBlock(project, query, ctxResults, cfg.Hooks.ClaudeMaxTokens), nil
 }
