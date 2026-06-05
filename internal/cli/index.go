@@ -162,16 +162,42 @@ func indexSpecificFiles(
 		return nil
 	}
 
-	// 6. Build LLM client and summarise symbols.
-	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels)
+	// 6. Build LLM client.
+	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
+		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
 
+	// 6b. Establish the project README *before* summarising, so each symbol
+	// summary can be grounded in the project's overall purpose. A full index
+	// regenerates it from the project's source; an incremental sync reuses the
+	// README produced by the last full index. A missing/failed README is
+	// non-fatal — summaries simply proceed without project context.
+	var projectReadme string
+	if specificFiles == nil {
+		readme, err := buildAndWriteReadme(ctx, llmClient, cfg.LLM.ReadmeModel, project, allSymbols)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warn: generating readme: %v\n", err)
+		} else {
+			projectReadme = readme
+			fmt.Printf("Wrote project readme to %s\n", config.ProjectReadmePath(project))
+		}
+	} else {
+		readme, err := config.ReadProjectReadme(project)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warn: reading project readme: %v\n", err)
+		}
+		projectReadme = readme
+	}
+
+	// 6c. Summarise symbols, passing the README (capped) as shared context.
+	readmeContext := capRunes(projectReadme, readmeContextCap)
 	requests := make([]llm.SummariseRequest, len(allSymbols))
 	for i, sym := range allSymbols {
 		requests[i] = llm.SummariseRequest{
-			Language: string(sym.Language),
-			Symbol:   sym.Symbol,
-			Type:     sym.Type,
-			Content:  sym.Content,
+			Language:       string(sym.Language),
+			Symbol:         sym.Symbol,
+			Type:           sym.Type,
+			Content:        sym.Content,
+			ProjectContext: readmeContext,
 		}
 	}
 
@@ -192,16 +218,43 @@ func indexSpecificFiles(
 	// 7b. Derive reverse call edges (called_by) across all extracted symbols.
 	computeCalledBy(allSymbols)
 
-	// 8. Build text blocks and embed in batches of 20 via OpenRouter.
-	texts := make([]string, len(allSymbols))
+	// 8. Build embedding inputs and embed in batches of 20 via OpenRouter. A
+	// single input that exceeds the embedding model's token limit makes the whole
+	// batch fail with HTTP 400, so oversized symbols (typically very large
+	// functions or files) are split into several chunks that each fit a
+	// conservative character budget. Each chunk becomes its own point; chunks of
+	// the same symbol share (branch, symbol) and are ordered by chunk_number.
+	budget := embedCharBudget(cfg.Embedding.MaxTokens)
+
+	// chunkRef ties an entry in texts/vectors back to its source symbol and its
+	// position within that symbol.
+	type chunkRef struct {
+		symIdx  int
+		content string // the slice of code stored in this chunk's payload
+		number  int
+		count   int
+	}
+	var texts []string
+	var refs []chunkRef
+	split := 0
 	for i, sym := range allSymbols {
-		texts[i] = qdrant.BuildEmbedText(sym.Payload)
+		chunks := qdrant.BuildEmbedChunks(sym.Payload, budget)
+		if len(chunks) > 1 {
+			split++
+		}
+		for n, ch := range chunks {
+			texts = append(texts, ch.Text)
+			refs = append(refs, chunkRef{symIdx: i, content: ch.Content, number: n, count: len(chunks)})
+		}
+	}
+	if split > 0 {
+		fmt.Fprintf(os.Stderr, "note: split %d oversized symbol(s) into multiple chunks to fit the embedding token limit\n", split)
 	}
 
 	const embedBatch = 20
 	vectors := make([][]float32, len(texts))
 
-	fmt.Printf("Embedding %d symbols", len(texts))
+	fmt.Printf("Embedding %d chunks", len(texts))
 	for start := 0; start < len(texts); start += embedBatch {
 		end := start + embedBatch
 		if end > len(texts) {
@@ -239,19 +292,40 @@ func indexSpecificFiles(
 		return fmt.Errorf("ensuring collection: %w", err)
 	}
 
-	// 12. Build Points and upsert.
-	points := make([]qdrant.Point, len(allSymbols))
-	for i, sym := range allSymbols {
+	// 11b. On an incremental re-index, purge every existing point for the files
+	// being re-indexed before upserting. A symbol may now span a different number
+	// of chunks than before (or have been removed), and deterministic IDs only
+	// overwrite chunks that still exist — so without this, shrinking a symbol from
+	// N chunks to M<N would leave orphaned chunks behind.
+	if specificFiles != nil {
+		for rel := range fileSet {
+			if err := qdrantClient.DeleteByFilter(ctx, collection, map[string]string{
+				"branch":    branch,
+				"file_path": rel,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: clearing old points for %s: %v\n", rel, err)
+			}
+		}
+	}
+
+	// 12. Build Points (one per chunk) and upsert.
+	points := make([]qdrant.Point, len(texts))
+	for i, ref := range refs {
+		sym := allSymbols[ref.symIdx]
+		payload := sym.Payload
+		payload.Content = ref.content
+		payload.ChunkNumber = ref.number
+		payload.ChunkCount = ref.count
 		points[i] = qdrant.Point{
-			ID:      qdrant.ID(sym.Branch, sym.Symbol),
+			ID:      qdrant.ID(sym.Branch, sym.Symbol, ref.number),
 			Vector:  vectors[i],
-			Payload: sym.Payload,
+			Payload: payload,
 		}
 	}
 
 	// Upsert in batches to avoid overly large requests.
 	const upsertBatch = 100
-	fmt.Printf("Upserting %d symbols", len(points))
+	fmt.Printf("Upserting %d chunks", len(points))
 	processed := 0
 	for start := 0; start < len(points); start += upsertBatch {
 		end := start + upsertBatch
@@ -270,19 +344,26 @@ func indexSpecificFiles(
 
 	fmt.Printf("Indexed %d symbols from %d files\n", len(allSymbols), len(fileSet))
 
-	// 13. Regenerate the project README on a full index. Incremental syncs
-	// (specificFiles != nil) only see a slice of the project and would produce a
-	// misleading whole-project document, so they are skipped. README failure is
-	// non-fatal: the symbols are already indexed.
-	if specificFiles == nil {
-		if err := generateProjectReadme(ctx, llmClient, cfg.LLM.ReadmeModel, project, allSymbols); err != nil {
-			fmt.Fprintf(os.Stderr, "warn: generating readme: %v\n", err)
-		} else {
-			fmt.Printf("Wrote project readme to %s\n", config.ProjectReadmePath(project))
-		}
-	}
-
 	return nil
+}
+
+// Embedding inputs are sized against a character budget derived from the model's
+// token limit. We cannot cheaply tokenise here, so we assume a conservative
+// chars-per-token ratio and only use a fraction of the limit; this keeps even
+// densely-tokenised source comfortably under the cap. Symbols whose rendered
+// text exceeds the budget are split into multiple chunks rather than truncated.
+const (
+	embedCharsPerToken = 3.0
+	embedSafetyFactor  = 0.8
+)
+
+// embedCharBudget converts a max-token limit into a conservative maximum rune
+// count for an embedding input. A non-positive limit falls back to 8192.
+func embedCharBudget(maxTokens int) int {
+	if maxTokens <= 0 {
+		maxTokens = 8192
+	}
+	return int(float64(maxTokens) * embedCharsPerToken * embedSafetyFactor)
 }
 
 // computeCalledBy populates each symbol's CalledBy with the qualified names of
@@ -327,39 +408,80 @@ func bareName(symbol string) string {
 	return symbol
 }
 
-// generateProjectReadme builds a business-logic-focused README from the indexed
-// symbols and writes it to ~/.nav-cli/projects/<project>/readme.md.
-func generateProjectReadme(ctx context.Context, client *llm.Client, readmeModel, project string, symbols []parser.Symbol) error {
+// readmeContextCap bounds how much of the project README is injected into each
+// per-symbol summary prompt. The README is shared by every summary call, so an
+// unbounded copy would multiply token cost across thousands of requests.
+const readmeContextCap = 8000
+
+// readmeSourceBudget bounds the amount of project source fed to the README
+// generator in a single request, keeping it under the model's context window.
+const readmeSourceBudget = 120000
+
+// buildAndWriteReadme generates a business-logic-focused README from the
+// project's source code (not from per-symbol summaries, which do not exist yet)
+// and writes it to ~/.nav-cli/projects/<project>/readme.md. It returns the
+// generated markdown so it can be reused as summarisation context.
+func buildAndWriteReadme(ctx context.Context, client *llm.Client, readmeModel, project string, symbols []parser.Symbol) (string, error) {
 	langSeen := make(map[string]bool)
 	var languages []string
-	readmeSymbols := make([]llm.ReadmeSymbol, 0, len(symbols))
 	for _, sym := range symbols {
 		if lang := string(sym.Language); lang != "" && !langSeen[lang] {
 			langSeen[lang] = true
 			languages = append(languages, lang)
 		}
-		readmeSymbols = append(readmeSymbols, llm.ReadmeSymbol{
-			Symbol:          sym.Symbol,
-			FilePath:        sym.FilePath,
-			Type:            sym.Type,
-			Summary:         sym.Summary,
-			BusinessContext: sym.BusinessContext,
-		})
+	}
+
+	source, truncated := buildReadmeSource(symbols, readmeSourceBudget)
+	if truncated {
+		fmt.Fprintf(os.Stderr, "note: project source exceeds the readme budget; generating from the first %d chars\n", readmeSourceBudget)
 	}
 
 	fmt.Print("Generating project readme")
 	content, err := client.GenerateReadme(ctx, readmeModel, llm.ReadmeRequest{
 		Project:   project,
 		Languages: languages,
-		Symbols:   readmeSymbols,
+		Source:    source,
 	})
 	if err != nil {
 		fmt.Println()
-		return err
+		return "", err
 	}
 	fmt.Println(" done")
 
-	return config.WriteProjectReadme(project, strings.TrimSpace(content)+"\n")
+	readme := strings.TrimSpace(content) + "\n"
+	if err := config.WriteProjectReadme(project, readme); err != nil {
+		return "", err
+	}
+	return readme, nil
+}
+
+// buildReadmeSource concatenates the indexed symbols' code into a single
+// evidence blob for README generation, grouped by file, stopping once budget
+// bytes are reached. The second return value reports whether the cap truncated
+// the project.
+func buildReadmeSource(symbols []parser.Symbol, budget int) (string, bool) {
+	var b strings.Builder
+	for _, sym := range symbols {
+		section := fmt.Sprintf("// %s — %s (%s)\n%s\n\n", sym.FilePath, sym.Symbol, sym.Type, sym.Content)
+		if budget > 0 && b.Len() > 0 && b.Len()+len(section) > budget {
+			return b.String(), true
+		}
+		b.WriteString(section)
+	}
+	return b.String(), false
+}
+
+// capRunes returns s truncated to at most max runes, cutting on a rune boundary.
+// A non-positive max returns s unchanged.
+func capRunes(s string, max int) string {
+	if max <= 0 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max])
 }
 
 

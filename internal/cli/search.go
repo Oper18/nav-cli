@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"nav/config"
@@ -73,7 +74,8 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	// 2. Embed the query via OpenRouter.
-	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels)
+	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
+		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
 
 	ctx := cmd.Context()
 	vecs, err := llmClient.EmbedQuery(ctx, cfg.Embedding.Model, cfg.Embedding.QueryInstruction, []string{query})
@@ -111,10 +113,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating qdrant client: %w", err)
 	}
 	defer qdrantClient.Close()
-	results, err := qdrantClient.Search(ctx, collection, queryVec, searchTop, searchThreshold, filters)
+	results, err := qdrantClient.Search(ctx, collection, queryVec, overFetch(searchTop), searchThreshold, filters)
 	if err != nil {
 		return fmt.Errorf("searching: %w", err)
 	}
+	results = topN(collapseChunks(results), searchTop)
 
 	// 5. Output.
 	if searchJSON {
@@ -125,6 +128,46 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 	printSearchResults(cmd, results)
 	return nil
+}
+
+// chunkFanout is how many extra candidates to request before collapsing chunks
+// of the same symbol, so a few large multi-chunk symbols cannot push distinct
+// results out of the requested top-K.
+const chunkFanout = 4
+
+// overFetch scales a requested result count up so there is room to collapse
+// chunks of the same symbol back down to count distinct hits.
+func overFetch(count int) int {
+	if count <= 0 {
+		return count
+	}
+	return count * chunkFanout
+}
+
+// collapseChunks deduplicates hits belonging to the same symbol (same branch and
+// symbol name), keeping the highest-scoring chunk of each. Qdrant returns hits
+// by descending score, so the first hit seen for a symbol is its best; input
+// order is otherwise preserved.
+func collapseChunks(hits []qdrant.Hit) []qdrant.Hit {
+	seen := make(map[[2]string]bool, len(hits))
+	out := make([]qdrant.Hit, 0, len(hits))
+	for _, h := range hits {
+		key := [2]string{h.Payload.Branch, h.Payload.Symbol}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, h)
+	}
+	return out
+}
+
+// topN returns at most n hits. A non-positive n returns hits unchanged.
+func topN(hits []qdrant.Hit, n int) []qdrant.Hit {
+	if n > 0 && len(hits) > n {
+		return hits[:n]
+	}
+	return hits
 }
 
 func printSearchResults(cmd *cobra.Command, results []qdrant.Hit) {
@@ -146,6 +189,9 @@ func printSearchResults(cmd *cobra.Command, results []qdrant.Hit) {
 		fmt.Fprintf(w, "File:    %s\n", p.FilePath)
 		if p.Branch != "" {
 			fmt.Fprintf(w, "Branch:  %s\n", p.Branch)
+		}
+		if p.ChunkCount > 1 {
+			fmt.Fprintf(w, "Chunk:   %d/%d (best-matching fragment)\n", p.ChunkNumber+1, p.ChunkCount)
 		}
 
 		if p.Summary != "" {

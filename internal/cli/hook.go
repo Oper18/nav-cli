@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"nav/config"
@@ -268,7 +269,8 @@ func runHookRunClaude(project, query string, topK int) error {
 		return fmt.Errorf("loading credentials: %w", err)
 	}
 
-	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels)
+	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
+		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
 
 	ctx := context.Background()
 
@@ -290,10 +292,11 @@ func runHookRunClaude(project, query string, topK int) error {
 	}
 	defer qdrantClient.Close()
 
-	results, err := qdrantClient.Search(ctx, collection, vecs[0], topK, cfg.Hooks.ClaudeMinScore, nil)
+	results, err := qdrantClient.Search(ctx, collection, vecs[0], overFetch(topK), cfg.Hooks.ClaudeMinScore, nil)
 	if err != nil {
 		return fmt.Errorf("searching: %w", err)
 	}
+	results = topN(collapseChunks(results), topK)
 
 	// Convert to hook.ContextResult.
 	ctxResults := make([]hook.ContextResult, 0, len(results))

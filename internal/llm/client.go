@@ -12,6 +12,14 @@ import (
 	"time"
 )
 
+// Default per-operation deadlines, used when NewClient is given a non-positive
+// value. README generation sends the whole project at once and streams a long
+// document, so it gets a much larger budget than a single-symbol summary.
+const (
+	defaultRequestTimeout = 60 * time.Second
+	defaultReadmeTimeout  = 5 * time.Minute
+)
+
 // Client is an OpenRouter HTTP client with retry/fallback logic.
 type Client struct {
 	apiKey         string
@@ -19,17 +27,32 @@ type Client struct {
 	fallbackModels []string
 	httpClient     *http.Client
 	baseURL        string
+	requestTimeout time.Duration
+	readmeTimeout  time.Duration
 }
 
 // NewClient creates a new Client using the given API key and models.
 // primaryModel is tried first; fallbackModels are tried in order on failure.
-func NewClient(apiKey, primaryModel string, fallbackModels []string) *Client {
+// requestTimeout bounds individual summarise/embed calls and readmeTimeout
+// bounds README generation; non-positive values fall back to the defaults.
+func NewClient(apiKey, primaryModel string, fallbackModels []string, requestTimeout, readmeTimeout time.Duration) *Client {
+	if requestTimeout <= 0 {
+		requestTimeout = defaultRequestTimeout
+	}
+	if readmeTimeout <= 0 {
+		readmeTimeout = defaultReadmeTimeout
+	}
 	return &Client{
 		apiKey:         apiKey,
 		primaryModel:   primaryModel,
 		fallbackModels: fallbackModels,
-		httpClient:     &http.Client{Timeout: 30 * time.Second},
+		// No client-level Timeout: each operation applies its own deadline via the
+		// request context, so a long README generation is not cut short by the
+		// tight budget appropriate for per-symbol summarisation.
+		httpClient:     &http.Client{},
 		baseURL:        "https://openrouter.ai/api/v1",
+		requestTimeout: requestTimeout,
+		readmeTimeout:  readmeTimeout,
 	}
 }
 
@@ -47,7 +70,9 @@ func (c *Client) Summarise(ctx context.Context, req SummariseRequest) (Summarise
 	allRateLimited := true
 
 	for _, model := range models {
-		resp, rateLimited, err := c.callModel(ctx, model, prompt)
+		attemptCtx, cancel := context.WithTimeout(ctx, c.requestTimeout)
+		resp, rateLimited, err := c.callModel(attemptCtx, model, prompt)
+		cancel()
 		if err == nil {
 			return resp, nil
 		}
@@ -159,7 +184,9 @@ func (c *Client) GenerateReadme(ctx context.Context, model string, req ReadmeReq
 
 	var lastErr error
 	for _, model := range models {
-		resp, _, err := c.callModel(ctx, model, prompt)
+		attemptCtx, cancel := context.WithTimeout(ctx, c.readmeTimeout)
+		resp, _, err := c.callModel(attemptCtx, model, prompt)
+		cancel()
 		if err == nil {
 			return resp.Summary, nil
 		}

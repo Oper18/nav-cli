@@ -48,6 +48,9 @@ func (c *Client) EmbedQuery(ctx context.Context, model, instruction string, quer
 // Embed sends texts to OpenRouter's embeddings endpoint using the given model
 // and returns vectors in input order.
 func (c *Client) Embed(ctx context.Context, model string, texts []string) ([][]float32, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
+	defer cancel()
+
 	body, err := json.Marshal(embedRequest{Model: model, Input: texts})
 	if err != nil {
 		return nil, fmt.Errorf("marshal embed request: %w", err)

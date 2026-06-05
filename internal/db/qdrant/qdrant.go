@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"nav/config"
@@ -34,10 +35,18 @@ type Payload struct {
 	Calls            []string
 	CalledBy         []string
 	Branch           string
+	// ChunkNumber is the 0-based index of this chunk within its symbol, and
+	// ChunkCount is the total number of chunks the symbol was split into. Small
+	// symbols produce a single chunk (ChunkNumber 0, ChunkCount 1); large symbols
+	// whose embed text would exceed the model's token limit are split into
+	// several. Order chunks by ChunkNumber to reassemble the full symbol via
+	// (Branch, Symbol).
+	ChunkNumber int
+	ChunkCount  int
 }
 
 // Point is a single upsert payload. ID is the sha256 hex digest of
-// (branch, symbol) — use ID() to compute it.
+// (branch, symbol, chunk) — use ID() to compute it.
 type Point struct {
 	ID      string
 	Vector  []float32
@@ -70,21 +79,34 @@ func (c *Client) Close() error {
 	return c.sdk.Close()
 }
 
-// ID returns the sha256 hex digest of (branch, symbol), separated by a NUL
-// byte to avoid collisions across branch/symbol boundaries.
-func ID(branch, symbol string) string {
+// ID returns the sha256 hex digest of (branch, symbol, chunk), with components
+// separated by a NUL byte to avoid collisions across their boundaries. The
+// chunk index keeps the several chunks of a split symbol from colliding while
+// remaining deterministic, so re-indexing overwrites a chunk in place.
+func ID(branch, symbol string, chunk int) string {
 	h := sha256.New()
 	h.Write([]byte(branch))
 	h.Write([]byte{0})
 	h.Write([]byte(symbol))
+	h.Write([]byte{0})
+	h.Write([]byte(strconv.Itoa(chunk)))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// BuildEmbedText renders the embedding-input template for a payload. The
-// resulting string is what gets fed to the embedding model.
-func BuildEmbedText(p Payload) string {
+// EmbedChunk is one embeddable slice of a symbol: Text is fed to the embedding
+// model, and Content is the slice of the symbol's code that the chunk's payload
+// should store.
+type EmbedChunk struct {
+	Text    string
+	Content string
+}
+
+// embedHeader renders the descriptive (non-code) portion of the embedding input
+// for a payload. It is repeated at the start of every chunk so each chunk's
+// vector retains the symbol's purpose and metadata.
+func embedHeader(p Payload) string {
 	return fmt.Sprintf(
-		"Symbol: %s\nType: %s\nLanguage: %s\n\nPurpose:\n%s\n\nBusiness context:\n%s\n\nResponsibilities:\n%s\n\nDependencies:\n%s\n\nConcepts:\n%s\n\nCode:\n%s",
+		"Symbol: %s\nType: %s\nLanguage: %s\n\nPurpose:\n%s\n\nBusiness context:\n%s\n\nResponsibilities:\n%s\n\nDependencies:\n%s\n\nConcepts:\n%s\n\nCode:\n",
 		p.Symbol,
 		p.Type,
 		p.Language,
@@ -93,8 +115,55 @@ func BuildEmbedText(p Payload) string {
 		strings.Join(p.Responsibilities, ", "),
 		strings.Join(p.Calls, ", "),
 		strings.Join(p.Tags, ", "),
-		normalizeContent(p.Content),
 	)
+}
+
+// BuildEmbedText renders the full embedding-input template for a payload as a
+// single string (header followed by the complete code body). It is the
+// unsplit form of BuildEmbedChunks and is retained for callers and tests that
+// do not care about the token limit.
+func BuildEmbedText(p Payload) string {
+	return embedHeader(p) + normalizeContent(p.Content)
+}
+
+// BuildEmbedChunks renders the embedding input(s) for a payload. When the full
+// text fits within maxRunes (or maxRunes is non-positive) it returns a single
+// chunk holding the whole symbol. Otherwise the code body is split across
+// several chunks, each prefixed with the descriptive header, so that every
+// chunk's text stays under maxRunes. Each returned chunk's Content is the slice
+// of code it covers; ordering chunks by their index reassembles the symbol.
+func BuildEmbedChunks(p Payload, maxRunes int) []EmbedChunk {
+	header := embedHeader(p)
+	code := normalizeContent(p.Content)
+
+	if maxRunes <= 0 || len([]rune(header))+len([]rune(code)) <= maxRunes {
+		return []EmbedChunk{{Text: header + code, Content: code}}
+	}
+
+	headerLen := len([]rune(header))
+	codeRunes := []rune(code)
+
+	// Room left for code after the repeated header. When the header alone leaves
+	// too little space (an unusually large summary/business context), fall back
+	// to a small positive budget so we still make progress rather than loop.
+	codeBudget := maxRunes - headerLen
+	if codeBudget < maxRunes/4 {
+		codeBudget = maxRunes / 4
+	}
+	if codeBudget < 1 {
+		codeBudget = 1
+	}
+
+	chunks := make([]EmbedChunk, 0, (len(codeRunes)+codeBudget-1)/codeBudget)
+	for start := 0; start < len(codeRunes); start += codeBudget {
+		end := start + codeBudget
+		if end > len(codeRunes) {
+			end = len(codeRunes)
+		}
+		slice := string(codeRunes[start:end])
+		chunks = append(chunks, EmbedChunk{Text: header + slice, Content: slice})
+	}
+	return chunks
 }
 
 // CollectionExists returns true when the named collection is present.
@@ -216,7 +285,7 @@ func (c *Client) Search(ctx context.Context, collection string, vector []float32
 	for _, sp := range scored {
 		payload := payloadFromValueMap(sp.GetPayload())
 		hits = append(hits, Hit{
-			ID:      ID(payload.Branch, payload.Symbol),
+			ID:      ID(payload.Branch, payload.Symbol, payload.ChunkNumber),
 			Score:   sp.GetScore(),
 			Payload: payload,
 		})
@@ -294,6 +363,8 @@ func payloadToValueMap(p Payload) map[string]*sdk.Value {
 		"business_context": p.BusinessContext,
 		"responsibilities": responsibilities,
 		"branch":           p.Branch,
+		"chunk_number":     int64(p.ChunkNumber),
+		"chunk_count":      int64(p.ChunkCount),
 	})
 }
 
@@ -312,6 +383,8 @@ func payloadFromValueMap(m map[string]*sdk.Value) Payload {
 		BusinessContext:  getString(m, "business_context"),
 		Responsibilities: getStringList(m, "responsibilities"),
 		Branch:           getString(m, "branch"),
+		ChunkNumber:      int(getInt(m, "chunk_number")),
+		ChunkCount:       int(getInt(m, "chunk_count")),
 	}
 }
 

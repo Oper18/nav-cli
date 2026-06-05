@@ -36,6 +36,20 @@ func ProjectReadmePath(name string) string {
 	return filepath.Join(ProjectDir(name), "readme.md")
 }
 
+// ReadProjectReadme returns the contents of the project's generated README, or
+// an empty string when none has been written yet. A missing file is not an
+// error: callers treat the absence as "no project context available".
+func ReadProjectReadme(name string) (string, error) {
+	data, err := os.ReadFile(ProjectReadmePath(name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("reading project readme: %w", err)
+	}
+	return string(data), nil
+}
+
 // WriteProjectReadme writes the generated README markdown to
 // ~/.nav-cli/projects/<name>/readme.md, creating the project directory if needed.
 func WriteProjectReadme(name, content string) error {

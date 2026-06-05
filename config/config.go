@@ -26,6 +26,11 @@ type LLMConfig struct {
 	// ReadmeModel is the model used to generate the project README. It defaults
 	// to qwen/qwen3-coder but can be overridden in config.yaml.
 	ReadmeModel string `mapstructure:"readme_model" yaml:"readme_model"`
+	// RequestTimeout bounds an individual summarise/embed request, in seconds.
+	// ReadmeTimeout bounds README generation, which sends the whole project at
+	// once and so needs a much larger budget. Defaults: 60s and 300s.
+	RequestTimeout int `mapstructure:"request_timeout" yaml:"request_timeout"`
+	ReadmeTimeout  int `mapstructure:"readme_timeout"  yaml:"readme_timeout"`
 }
 
 // EmbeddingConfig holds settings for the OpenRouter embeddings endpoint.
@@ -36,6 +41,10 @@ type EmbeddingConfig struct {
 	// not to indexed documents) for instruction-aware asymmetric embedders such
 	// as Qwen3-Embedding. Leave empty to embed queries verbatim.
 	QueryInstruction string `mapstructure:"query_instruction" yaml:"query_instruction"`
+	// MaxTokens is the embedding model's maximum input length in tokens. Inputs
+	// longer than this are rejected by the API, so oversized symbols are
+	// truncated to fit before embedding. Defaults to 8192.
+	MaxTokens int `mapstructure:"max_tokens" yaml:"max_tokens"`
 }
 
 // IndexingConfig holds settings that control the indexing pipeline.
@@ -103,10 +112,13 @@ func Load() (*Config, error) {
 	})
 	v.SetDefault("llm.batch_size", 10)
 	v.SetDefault("llm.readme_model", "qwen/qwen3-coder")
+	v.SetDefault("llm.request_timeout", 60)
+	v.SetDefault("llm.readme_timeout", 300)
 
 	v.SetDefault("embedding.model", "qwen/qwen3-embedding-8b")
 	v.SetDefault("embedding.dimension", 4096)
 	v.SetDefault("embedding.query_instruction", "Given a code search query, retrieve relevant code symbols that satisfy it")
+	v.SetDefault("embedding.max_tokens", 8192)
 
 	v.SetDefault("indexing.concurrency", 4)
 	v.SetDefault("indexing.skip_patterns", []string{
@@ -245,13 +257,16 @@ func WriteDefault() error {
 				"mistralai/devstral-2",
 				"meta-llama/llama-3.3-70b-instruct",
 			},
-			BatchSize:   10,
-			ReadmeModel: "qwen/qwen3-coder",
+			BatchSize:      10,
+			ReadmeModel:    "qwen/qwen3-coder",
+			RequestTimeout: 60,
+			ReadmeTimeout:  300,
 		},
 		Embedding: EmbeddingConfig{
 			Model:            "qwen/qwen3-embedding-8b",
 			Dimension:        4096,
 			QueryInstruction: "Given a code search query, retrieve relevant code symbols that satisfy it",
+			MaxTokens:        8192,
 		},
 		Indexing: IndexingConfig{
 			Concurrency: 4,

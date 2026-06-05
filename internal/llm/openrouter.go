@@ -29,6 +29,10 @@ type SummariseRequest struct {
 	Symbol   string
 	Type     string
 	Content  string
+	// ProjectContext is the project-level README, supplied so each symbol summary
+	// can be grounded in the project's overall purpose. It may be empty (e.g. on
+	// the first index before a README exists).
+	ProjectContext string
 }
 
 // SummariseResponse is what the LLM returns for a single symbol.
@@ -44,19 +48,13 @@ type SummariseResponse struct {
 	Responsibilities []string
 }
 
-// ReadmeSymbol is a compact, code-free descriptor of one indexed symbol that is
-// fed to the project-README generator.
-type ReadmeSymbol struct {
-	Symbol          string
-	FilePath        string
-	Type            string
-	Summary         string
-	BusinessContext string
-}
-
-// ReadmeRequest is the input to the project-level README generation step.
+// ReadmeRequest is the input to the project-level README generation step. The
+// README is generated from the project's source up front (before per-symbol
+// summarisation), so it carries the source as evidence rather than summaries.
 type ReadmeRequest struct {
 	Project   string
 	Languages []string
-	Symbols   []ReadmeSymbol
+	// Source is a budgeted concatenation of the project's indexed code, used as
+	// evidence of what the project does.
+	Source string
 }

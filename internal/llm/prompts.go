@@ -8,6 +8,15 @@ import (
 // buildSummarisePrompt returns the prompt sent to the LLM for code summarisation.
 // It is used internally by client.go.
 func buildSummarisePrompt(req SummariseRequest) string {
+	var projectSection string
+	if strings.TrimSpace(req.ProjectContext) != "" {
+		projectSection = fmt.Sprintf(
+			"Project overview (for context only — use it to ground the business/domain "+
+				"purpose of this symbol; do not restate it):\n%s\n\n",
+			req.ProjectContext,
+		)
+	}
+
 	return fmt.Sprintf(
 		"You are a code documentation assistant.\n"+
 			"Given the source code below, respond ONLY with a JSON object containing exactly these fields:\n"+
@@ -16,10 +25,12 @@ func buildSummarisePrompt(req SummariseRequest) string {
 			"  \"tags\": an array of 3-6 lowercase keywords\n"+
 			"  \"businessContext\": one sentence describing the business/domain purpose this code serves (the why), not its implementation\n"+
 			"  \"responsibilities\": an array of 1-4 short phrases, each naming one distinct responsibility this code owns\n\n"+
+			"%s"+
 			"Language: %s\n"+
 			"Symbol: %s\n"+
 			"Type: %s\n\n"+
 			"Source:\n%s",
+		projectSection,
 		req.Language,
 		req.Symbol,
 		req.Type,
@@ -31,15 +42,6 @@ func buildSummarisePrompt(req SummariseRequest) string {
 // README focused on business logic and high-level technical decisions. The
 // resulting document must deliberately avoid code or implementation detail.
 func buildReadmePrompt(req ReadmeRequest) string {
-	var b strings.Builder
-	for _, s := range req.Symbols {
-		ctx := s.BusinessContext
-		if ctx == "" {
-			ctx = s.Summary
-		}
-		fmt.Fprintf(&b, "- %s (%s, %s): %s\n", s.Symbol, s.Type, s.FilePath, ctx)
-	}
-
 	return fmt.Sprintf(
 		"You are a technical writer producing the README for the %q project.\n\n"+
 			"Write the README in Markdown. It MUST describe the business logic — what the "+
@@ -52,11 +54,11 @@ func buildReadmePrompt(req ReadmeRequest) string {
 			"  - Stay high level: a stakeholder who cannot read code should understand it.\n"+
 			"  - Respond ONLY with the Markdown document, no preamble.\n\n"+
 			"Detected languages: %s\n\n"+
-			"The following per-symbol notes are provided only as evidence of what the "+
-			"project does — synthesise them into business capabilities, do not list them "+
-			"verbatim:\n%s",
+			"The following is the project's source code, provided only as evidence of what "+
+			"the project does — synthesise it into business capabilities, do not reproduce "+
+			"it:\n%s",
 		req.Project,
 		strings.Join(req.Languages, ", "),
-		b.String(),
+		req.Source,
 	)
 }
