@@ -64,14 +64,29 @@ func ProgrammingLanguage(filePath string) config.ProgrammingLanguage {
 // Also returns true if the base name (without extension) ends in "_test" for Go files.
 func ShouldSkip(filePath string, patterns []string) bool {
 	for _, pattern := range patterns {
-		matched, err := filepath.Match(pattern, filePath)
-		if err == nil && matched {
-			return true
-		}
-		// Also match against just the base name.
-		matched, err = filepath.Match(pattern, filepath.Base(filePath))
-		if err == nil && matched {
-			return true
+		// Handle the special case of "directory/**" pattern which should match
+		// all nested paths within that directory
+		if strings.HasSuffix(pattern, "/**") {
+			prefix := strings.TrimSuffix(pattern, "/**")
+			// Convert relative path separators consistently for comparison
+			normalizedPath := filepath.ToSlash(filePath)
+			normalizedPrefix := filepath.ToSlash(prefix)
+			
+			// Check if the file path starts with the directory prefix
+			if normalizedPath == normalizedPrefix || strings.HasPrefix(normalizedPath+"/", normalizedPrefix+"/") {
+				return true
+			}
+		} else {
+			// Standard glob matching
+			matched, err := filepath.Match(pattern, filePath)
+			if err == nil && matched {
+				return true
+			}
+			// Also match against just the base name.
+			matched, err = filepath.Match(pattern, filepath.Base(filePath))
+			if err == nil && matched {
+				return true
+			}
 		}
 	}
 

@@ -20,7 +20,7 @@ import (
 
 var hookCmd = &cobra.Command{
 	Use:   "hook",
-	Short: "Manage git and Claude Code hook installation",
+	Short: "Manage git, Claude Code, and Qwen Code hook installation",
 }
 
 // ---------------------------------------------------------------------------
@@ -89,8 +89,29 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("nav Claude hook installed in %s\n", settingsPath)
 
+	case "qwen":
+		project, _, err := resolveProject(args, hookInstallPath)
+		if err != nil {
+			return err
+		}
+		var settingsPath string
+		if hookInstallGlobal {
+			settingsPath = hook.QwenGlobalSettingsPath()
+		} else {
+			dir := hookInstallPath
+			if dir == "" {
+				dir = "."
+			}
+			settingsPath = hook.QwenDefaultSettingsPath(dir)
+		}
+		topK := cfg.Hooks.QwenTopK // Use Qwen-specific configuration
+		if err := hook.InstallQwen(settingsPath, project, topK); err != nil {
+			return fmt.Errorf("installing Qwen hook: %w", err)
+		}
+		fmt.Printf("nav Qwen hook installed in %s\n", settingsPath)
+
 	default:
-		return fmt.Errorf("unknown hook type %q; must be \"git\" or \"claude\"", hookInstallType)
+		return fmt.Errorf("unknown hook type %q; must be \"git\", \"claude\", or \"qwen\"", hookInstallType)
 	}
 	return nil
 }
@@ -147,8 +168,24 @@ func runHookUninstall(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("nav Claude hook removed from %s\n", settingsPath)
 
+	case "qwen":
+		var settingsPath string
+		if hookUninstallGlobal {
+			settingsPath = hook.QwenGlobalSettingsPath()
+		} else {
+			dir := hookUninstallPath
+			if dir == "" {
+				dir = "."
+			}
+			settingsPath = hook.QwenDefaultSettingsPath(dir)
+		}
+		if err := hook.UninstallQwen(settingsPath); err != nil {
+			return fmt.Errorf("uninstalling Qwen hook: %w", err)
+		}
+		fmt.Printf("nav Qwen hook removed from %s\n", settingsPath)
+
 	default:
-		return fmt.Errorf("unknown hook type %q; must be \"git\" or \"claude\"", hookUninstallType)
+		return fmt.Errorf("unknown hook type %q; must be \"git\", \"claude\", or \"qwen\"", hookUninstallType)
 	}
 	return nil
 }
@@ -172,10 +209,10 @@ var hookRunCmd = &cobra.Command{
 }
 
 func init() {
-	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git" or "claude" (required)`)
+	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git", "claude", or "qwen" (required)`)
 	hookRunCmd.Flags().StringVar(&hookRunPath, "path", ".", "Repository path (for git hooks)")
-	hookRunCmd.Flags().IntVar(&hookRunTop, "top", 5, "Number of results to inject (for claude hooks)")
-	hookRunCmd.Flags().StringVar(&hookRunQuery, "query", "", "Query text (for claude hooks)")
+	hookRunCmd.Flags().IntVar(&hookRunTop, "top", 5, "Number of results to inject (for claude and qwen hooks)")
+	hookRunCmd.Flags().StringVar(&hookRunQuery, "query", "", "Query text (for claude and qwen hooks)")
 
 	_ = hookRunCmd.MarkFlagRequired("type")
 }
@@ -192,8 +229,15 @@ func runHookRun(cmd *cobra.Command, args []string) error {
 		}
 		return runHookRunClaude(project, hookRunQuery, hookRunTop)
 
+	case "qwen":
+		project, _, err := resolveProject(args, hookRunPath)
+		if err != nil {
+			return err
+		}
+		return runHookRunQwen(project, hookRunQuery, hookRunTop) // Call dedicated Qwen function
+
 	default:
-		return fmt.Errorf("unknown hook type %q; must be \"git\" or \"claude\"", hookRunType)
+		return fmt.Errorf("unknown hook type %q; must be \"git\", \"claude\", or \"qwen\"", hookRunType)
 	}
 }
 
@@ -312,6 +356,69 @@ func runHookRunClaude(project, query string, topK int) error {
 	}
 
 	block := hook.FormatContextBlock(project, query, ctxResults, cfg.Hooks.ClaudeMaxTokens)
+	fmt.Println(block)
+	return nil
+}
+
+// runHookRunQwen handles the Qwen Code prompt hook: embeds the query,
+// searches Qdrant, formats a context block, and prints it.
+func runHookRunQwen(project, query string, topK int) error {
+	if query == "" {
+		return nil // nothing to do
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		return fmt.Errorf("loading credentials: %w", err)
+	}
+
+	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
+		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
+
+	ctx := context.Background()
+
+	vecs, err := llmClient.EmbedQuery(ctx, cfg.Embedding.Model, cfg.Embedding.QueryInstruction, []string{query})
+	if err != nil {
+		return fmt.Errorf("embedding query: %w", err)
+	}
+	if len(vecs) == 0 {
+		return fmt.Errorf("embedder returned no vectors")
+	}
+
+	collection := "nav_" + project
+	if err := services.EnsureLocalQdrant(cfg); err != nil {
+		return fmt.Errorf("ensuring local qdrant: %w", err)
+	}
+	qdrantClient, err := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
+	if err != nil {
+		return fmt.Errorf("creating qdrant client: %w", err)
+	}
+	defer qdrantClient.Close()
+
+	results, err := qdrantClient.Search(ctx, collection, vecs[0], overFetch(topK), cfg.Hooks.QwenMinScore, nil)
+	if err != nil {
+		return fmt.Errorf("searching: %w", err)
+	}
+	results = topN(collapseChunks(results), topK)
+
+	// Convert to hook.ContextResult.
+	ctxResults := make([]hook.ContextResult, 0, len(results))
+	for _, r := range results {
+		ctxResults = append(ctxResults, hook.ContextResult{
+			Score:   r.Score,
+			Symbol:  r.Payload.Symbol,
+			Type:    r.Payload.Type,
+			File:    r.Payload.FilePath,
+			Purpose: r.Payload.Summary,
+			Code:    r.Payload.Content,
+		})
+	}
+
+	block := hook.FormatContextBlock(project, query, ctxResults, cfg.Hooks.QwenMaxTokens)
 	fmt.Println(block)
 	return nil
 }

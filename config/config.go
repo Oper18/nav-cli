@@ -60,6 +60,9 @@ type HooksConfig struct {
 	ClaudeTopK      int     `mapstructure:"claude_top_k"    yaml:"claude_top_k"`
 	ClaudeMinScore  float64 `mapstructure:"claude_min_score" yaml:"claude_min_score"`
 	ClaudeMaxTokens int     `mapstructure:"claude_max_tokens" yaml:"claude_max_tokens"`
+	QwenTopK        int     `mapstructure:"qwen_top_k"      yaml:"qwen_top_k"`
+	QwenMinScore    float64 `mapstructure:"qwen_min_score"  yaml:"qwen_min_score"`
+	QwenMaxTokens   int     `mapstructure:"qwen_max_tokens" yaml:"qwen_max_tokens"`
 }
 
 // Config is the root configuration structure.
@@ -141,6 +144,9 @@ func Load() (*Config, error) {
 	v.SetDefault("hooks.claude_top_k", 5)
 	v.SetDefault("hooks.claude_min_score", 0.72)
 	v.SetDefault("hooks.claude_max_tokens", 4000)
+	v.SetDefault("hooks.qwen_top_k", 5)              // Default to same as Claude
+	v.SetDefault("hooks.qwen_min_score", 0.72)       // Default to same as Claude
+	v.SetDefault("hooks.qwen_max_tokens", 4000)      // Default to same as Claude
 
 	// Config file location
 	v.SetConfigName("config")
@@ -291,6 +297,9 @@ func WriteDefault() error {
 			ClaudeTopK:      5,
 			ClaudeMinScore:  0.4,
 			ClaudeMaxTokens: 4000,
+			QwenTopK:        5,
+			QwenMinScore:    0.4,
+			QwenMaxTokens:   4000,
 		},
 	}
 
