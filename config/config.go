@@ -58,13 +58,16 @@ type IndexingConfig struct {
 
 // HooksConfig holds settings used by git and editor hooks.
 type HooksConfig struct {
-	GitSkipEnv      string  `mapstructure:"git_skip_env"    yaml:"git_skip_env"`
-	ClaudeTopK      int     `mapstructure:"claude_top_k"    yaml:"claude_top_k"`
-	ClaudeMinScore  float64 `mapstructure:"claude_min_score" yaml:"claude_min_score"`
-	ClaudeMaxTokens int     `mapstructure:"claude_max_tokens" yaml:"claude_max_tokens"`
-	QwenTopK        int     `mapstructure:"qwen_top_k"      yaml:"qwen_top_k"`
-	QwenMinScore    float64 `mapstructure:"qwen_min_score"  yaml:"qwen_min_score"`
-	QwenMaxTokens   int     `mapstructure:"qwen_max_tokens" yaml:"qwen_max_tokens"`
+	GitSkipEnv       string  `mapstructure:"git_skip_env"     yaml:"git_skip_env"`
+	ClaudeTopK       int     `mapstructure:"claude_top_k"     yaml:"claude_top_k"`
+	ClaudeMinScore   float64 `mapstructure:"claude_min_score" yaml:"claude_min_score"`
+	ClaudeMaxTokens  int     `mapstructure:"claude_max_tokens" yaml:"claude_max_tokens"`
+	QwenTopK         int     `mapstructure:"qwen_top_k"       yaml:"qwen_top_k"`
+	QwenMinScore     float64 `mapstructure:"qwen_min_score"   yaml:"qwen_min_score"`
+	QwenMaxTokens    int     `mapstructure:"qwen_max_tokens"  yaml:"qwen_max_tokens"`
+	CursorTopK       int     `mapstructure:"cursor_top_k"     yaml:"cursor_top_k"`
+	CursorMinScore   float64 `mapstructure:"cursor_min_score" yaml:"cursor_min_score"`
+	CursorMaxTokens  int     `mapstructure:"cursor_max_tokens" yaml:"cursor_max_tokens"`
 }
 
 // Config is the root configuration structure.
@@ -150,6 +153,9 @@ func Load() (*Config, error) {
 	v.SetDefault("hooks.qwen_top_k", 5)              // Default to same as Claude
 	v.SetDefault("hooks.qwen_min_score", 0.72)       // Default to same as Claude
 	v.SetDefault("hooks.qwen_max_tokens", 4000)      // Default to same as Claude
+	v.SetDefault("hooks.cursor_top_k", 5)             // Default to same as Claude and Qwen
+	v.SetDefault("hooks.cursor_min_score", 0.72)      // Default to same as Claude and Qwen
+	v.SetDefault("hooks.cursor_max_tokens", 4000)     // Default to same as Claude and Qwen
 
 	// Config file location
 	v.SetConfigName("config")
@@ -304,6 +310,9 @@ func WriteDefault() error {
 			QwenTopK:        5,
 			QwenMinScore:    0.4,
 			QwenMaxTokens:   4000,
+			CursorTopK:      5,
+			CursorMinScore:  0.4,
+			CursorMaxTokens: 4000,
 		},
 	}
 
