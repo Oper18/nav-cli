@@ -189,11 +189,14 @@ llm:
   fallback_models:
     - mistralai/devstral-2
     - meta-llama/llama-3.3-70b-instruct
+  request_timeout: 60            # timeout (in seconds) for LLM requests
+  readme_timeout: 300            # timeout (in seconds) for README generation
 
 embedding:
   provider: nvidia               # nvidia | qwen | openai
   model: nvidia/nemotron-embed-vl-1b-v2
   dimension: 1024                # must match the Qdrant collection
+  request_timeout: 120           # timeout (in seconds) for embedding requests (useful for large projects)
 
 indexing:
   concurrency: 4                 # parallel symbol processing goroutines
@@ -394,6 +397,7 @@ nav index --project <name> --path <repo-root> [flags]
 | `--force` | false | re-index all symbols even if `last_modified` is unchanged |
 | `--lang` | auto | restrict to a single language (`go`, `python`, `typescript`, …) |
 | `--collection` | nav_\<project\> | override Qdrant collection name |
+| `--ignore-dir` | none | directories to exclude from indexing (can be specified multiple times) |
 
 Full reindex of a project:
 
@@ -405,6 +409,12 @@ Dry-run to inspect what would be indexed:
 
 ```bash
 nav index --project mokosh --path ~/work/mokosh --dry-run
+```
+
+Skip indexing specific directories using --ignore-dir (can be used multiple times):
+
+```bash
+nav index --project mokosh --path ~/work/mokosh --ignore-dir vendor --ignore-dir dist
 ```
 
 ---

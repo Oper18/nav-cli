@@ -265,7 +265,7 @@ func runHookRunGit(repoPath string) error {
 	ctx := context.Background()
 
 	if len(changed) > 0 {
-		if err := indexSpecificFiles(ctx, project, repoPath, "", "", cfg.Indexing.Concurrency, false, changed); err != nil {
+		if err := indexSpecificFiles(ctx, project, repoPath, "", "", cfg.Indexing.Concurrency, false, changed, []string{}); err != nil {
 			fmt.Fprintf(os.Stderr, "nav: warn: re-indexing: %v\n", err)
 		}
 	}

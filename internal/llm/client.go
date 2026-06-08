@@ -28,16 +28,20 @@ type Client struct {
 	httpClient     *http.Client
 	baseURL        string
 	requestTimeout time.Duration
+	embedTimeout   time.Duration
 	readmeTimeout  time.Duration
 }
 
-// NewClient creates a new Client using the given API key and models.
+// NewClientWithEmbedTimeout creates a new Client using the given API key and models.
 // primaryModel is tried first; fallbackModels are tried in order on failure.
-// requestTimeout bounds individual summarise/embed calls and readmeTimeout
-// bounds README generation; non-positive values fall back to the defaults.
-func NewClient(apiKey, primaryModel string, fallbackModels []string, requestTimeout, readmeTimeout time.Duration) *Client {
+// requestTimeout bounds individual summarise calls and embedTimeout bounds embed calls;
+// readmeTimeout bounds README generation; non-positive values fall back to the defaults.
+func NewClientWithEmbedTimeout(apiKey, primaryModel string, fallbackModels []string, requestTimeout, embedTimeout, readmeTimeout time.Duration) *Client {
 	if requestTimeout <= 0 {
 		requestTimeout = defaultRequestTimeout
+	}
+	if embedTimeout <= 0 {
+		embedTimeout = defaultRequestTimeout * 2 // Default embed timeout to be double of request timeout
 	}
 	if readmeTimeout <= 0 {
 		readmeTimeout = defaultReadmeTimeout
@@ -52,6 +56,35 @@ func NewClient(apiKey, primaryModel string, fallbackModels []string, requestTime
 		httpClient:     &http.Client{},
 		baseURL:        "https://openrouter.ai/api/v1",
 		requestTimeout: requestTimeout,
+		embedTimeout:   embedTimeout,
+		readmeTimeout:  readmeTimeout,
+	}
+}
+
+// NewClient creates a new Client using the given API key and models.
+// This is a wrapper for backward compatibility keeping the original interface.
+// primaryModel is tried first; fallbackModels are tried in order on a 429 (rate-limit) or any other non-2xx response.
+// requestTimeout bounds individual summarise/embed calls and readmeTimeout
+// bounds README generation; non-positive values fall back to the defaults.
+func NewClient(apiKey, primaryModel string, fallbackModels []string, requestTimeout, readmeTimeout time.Duration) *Client {
+	if requestTimeout <= 0 {
+		requestTimeout = defaultRequestTimeout
+	}
+	if readmeTimeout <= 0 {
+		readmeTimeout = defaultReadmeTimeout
+	}
+	// For backward compatibility, embedTimeout is set the same as requestTimeout
+	return &Client{
+		apiKey:         apiKey,
+		primaryModel:   primaryModel,
+		fallbackModels: fallbackModels,
+		// No client-level Timeout: each operation applies its own deadline via the
+		// request context, so a long README generation is not cut short by the
+		// tight budget appropriate for per-symbol summarisation.
+		httpClient:     &http.Client{},
+		baseURL:        "https://openrouter.ai/api/v1",
+		requestTimeout: requestTimeout,
+		embedTimeout:   requestTimeout, // Same as request timeout for backward compatibility
 		readmeTimeout:  readmeTimeout,
 	}
 }

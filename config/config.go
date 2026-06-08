@@ -45,6 +45,8 @@ type EmbeddingConfig struct {
 	// longer than this are rejected by the API, so oversized symbols are
 	// truncated to fit before embedding. Defaults to 8192.
 	MaxTokens int `mapstructure:"max_tokens" yaml:"max_tokens"`
+	// RequestTimeout bounds an embedding request in seconds. Defaults to 120s.
+	RequestTimeout int `mapstructure:"request_timeout" yaml:"request_timeout"`
 }
 
 // IndexingConfig holds settings that control the indexing pipeline.
@@ -122,6 +124,7 @@ func Load() (*Config, error) {
 	v.SetDefault("embedding.dimension", 4096)
 	v.SetDefault("embedding.query_instruction", "Given a code search query, retrieve relevant code symbols that satisfy it")
 	v.SetDefault("embedding.max_tokens", 8192)
+	v.SetDefault("embedding.request_timeout", 120)
 
 	v.SetDefault("indexing.concurrency", 4)
 	v.SetDefault("indexing.skip_patterns", []string{
@@ -273,6 +276,7 @@ func WriteDefault() error {
 			Dimension:        4096,
 			QueryInstruction: "Given a code search query, retrieve relevant code symbols that satisfy it",
 			MaxTokens:        8192,
+			RequestTimeout:   120,
 		},
 		Indexing: IndexingConfig{
 			Concurrency: 4,

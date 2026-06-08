@@ -84,7 +84,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 
 	// 4. Re-index changed files using shared indexing logic.
-	if err := indexSpecificFiles(ctx, project, path, "", "", 4, false, changedFiles); err != nil {
+	if err := indexSpecificFiles(ctx, project, path, "", "", 4, false, changedFiles, []string{}); err != nil {
 		return err
 	}
 

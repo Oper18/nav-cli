@@ -26,6 +26,7 @@ var (
 	indexForce       bool
 	indexLang        string
 	indexCollection  string
+	indexIgnoreDirs  []string
 )
 
 var indexCmd = &cobra.Command{
@@ -47,6 +48,7 @@ func init() {
 	indexCmd.Flags().BoolVar(&indexForce, "force", false, "Re-index even if the symbol already exists")
 	indexCmd.Flags().StringVar(&indexLang, "lang", "", "Only index files of this language")
 	indexCmd.Flags().StringVar(&indexCollection, "collection", "", "Qdrant collection name (default: nav_<project>)")
+	indexCmd.Flags().StringSliceVar(&indexIgnoreDirs, "ignore-dir", []string{}, "Directories to exclude from indexing (can be specified multiple times)")
 }
 
 func runIndex(cmd *cobra.Command, args []string) error {
@@ -54,7 +56,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return indexFiles(cmd.Context(), project, path, indexCollection, indexLang, indexConcurrency, indexDryRun)
+	return indexFiles(cmd.Context(), project, path, indexCollection, indexLang, indexConcurrency, indexDryRun, indexIgnoreDirs)
 }
 
 // indexFiles contains the shared indexing logic used by both `nav index` and
@@ -64,8 +66,9 @@ func indexFiles(
 	project, repoPath, collectionFlag, langFilter string,
 	concurrency int,
 	dryRun bool,
+	ignoreDirs []string,
 ) error {
-	return indexSpecificFiles(ctx, project, repoPath, collectionFlag, langFilter, concurrency, dryRun, nil)
+	return indexSpecificFiles(ctx, project, repoPath, collectionFlag, langFilter, concurrency, dryRun, nil, ignoreDirs)
 }
 
 // indexSpecificFiles indexes only the given relative file paths (or all files
@@ -76,6 +79,7 @@ func indexSpecificFiles(
 	concurrency int,
 	dryRun bool,
 	specificFiles []string,
+	ignoreDirs []string,
 ) error {
 	// 1. Load config and credentials.
 	cfg, err := config.Load()
@@ -97,13 +101,40 @@ func indexSpecificFiles(
 			if err != nil {
 				return nil // skip unreadable entries
 			}
-			if d.IsDir() {
-				return nil
-			}
+
+			// Convert path to relative path to check against ignore directories
 			rel, err := filepath.Rel(repoPath, path)
 			if err != nil {
-				return nil
+				return nil // skip entries that can't be relativized
 			}
+
+			// Handle directory skipping based on ignore dirs
+			if d.IsDir() {
+				// Clean relative path for comparison - this represents the current directory path relative to repo root
+				cleanRelPath := filepath.Clean(rel)
+				
+				// Compare against ignore directories provided via the flag
+				for _, ignoreDir := range ignoreDirs {
+					if filepath.IsAbs(ignoreDir) {
+						// If ignoreDir is absolute, check if the current absolute path starts with it
+						if strings.HasPrefix(path, ignoreDir+string(filepath.Separator)) || path == ignoreDir {
+							return filepath.SkipDir
+						}
+					} else {
+						// If ignoreDir is relative, treat it as relative to the repo root
+						// cleanRelPath is the current directory path relative to the repo root
+						// For example: if we're looking at /repo/src/utils and ignoreDir="vendor", 
+						// we check if "src/utils" matches the pattern "vendor"  
+						normalizedIgnoreDir := filepath.Clean(ignoreDir)
+						if cleanRelPath == normalizedIgnoreDir ||
+						   strings.HasPrefix(cleanRelPath, normalizedIgnoreDir+string(filepath.Separator)) {
+							return filepath.SkipDir
+						}
+					}
+				}
+				return nil // Don't add directories to relPaths, continue walking
+			}
+
 			relPaths = append(relPaths, rel)
 			return nil
 		}); err != nil {
@@ -163,8 +194,10 @@ func indexSpecificFiles(
 	}
 
 	// 6. Build LLM client.
-	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
-		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
+	llmClient := llm.NewClientWithEmbedTimeout(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
+		time.Duration(cfg.LLM.RequestTimeout)*time.Second, 
+		time.Duration(cfg.Embedding.RequestTimeout)*time.Second,
+		time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
 
 	// 6b. Establish the project README *before* summarising, so each symbol
 	// summary can be grounded in the project's overall purpose. A full index
