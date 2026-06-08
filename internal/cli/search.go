@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -57,37 +58,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Default the branch filter to the current branch of the project's repository.
 	branch := searchBranch
 	if branch == "" {
 		branch = currentBranch(repoPath)
 	}
 
-	// 1. Load config and credentials.
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return fmt.Errorf("loading credentials: %w", err)
-	}
-
-	// 2. Embed the query via OpenRouter.
-	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
-		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
-
-	ctx := cmd.Context()
-	vecs, err := llmClient.EmbedQuery(ctx, cfg.Embedding.Model, cfg.Embedding.QueryInstruction, []string{query})
-	if err != nil {
-		return fmt.Errorf("embedding query: %w", err)
-	}
-	if len(vecs) == 0 {
-		return fmt.Errorf("embedder returned no vectors")
-	}
-	queryVec := vecs[0]
-
-	// 3. Build filters.
 	filters := map[string]string{}
 	if branch != "" {
 		filters["branch"] = branch
@@ -99,25 +74,15 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		filters["language"] = searchLang
 	}
 
-	// 4. Determine collection and search.
 	collection := searchCollection
 	if collection == "" {
 		collection = "nav_" + searchProject
 	}
 
-	if err := services.EnsureLocalQdrant(cfg); err != nil {
-		return fmt.Errorf("ensuring local qdrant: %w", err)
-	}
-	qdrantClient, err := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
+	results, err := searchIndexed(cmd.Context(), searchProject, repoPath, query, searchTop, searchThreshold, collection, filters)
 	if err != nil {
-		return fmt.Errorf("creating qdrant client: %w", err)
+		return err
 	}
-	defer qdrantClient.Close()
-	results, err := qdrantClient.Search(ctx, collection, queryVec, overFetch(searchTop), searchThreshold, filters)
-	if err != nil {
-		return fmt.Errorf("searching: %w", err)
-	}
-	results = topN(collapseChunks(results), searchTop)
 
 	// 5. Output.
 	if searchJSON {
@@ -128,6 +93,58 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 	printSearchResults(cmd, results)
 	return nil
+}
+
+// searchIndexed embeds query and searches Qdrant for a project. When repoPath is
+// non-empty and filters omit branch, the current git branch is applied automatically.
+func searchIndexed(ctx context.Context, project, repoPath, query string, top int, minScore float64, collection string, filters map[string]string) ([]qdrant.Hit, error) {
+	if collection == "" {
+		collection = "nav_" + project
+	}
+
+	if filters == nil {
+		filters = map[string]string{}
+	}
+	if _, ok := filters["branch"]; !ok && repoPath != "" {
+		if branch := currentBranch(repoPath); branch != "" {
+			filters["branch"] = branch
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("loading config: %w", err)
+	}
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		return nil, fmt.Errorf("loading credentials: %w", err)
+	}
+
+	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
+		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
+
+	vecs, err := llmClient.EmbedQuery(ctx, cfg.Embedding.Model, cfg.Embedding.QueryInstruction, []string{query})
+	if err != nil {
+		return nil, fmt.Errorf("embedding query: %w", err)
+	}
+	if len(vecs) == 0 {
+		return nil, fmt.Errorf("embedder returned no vectors")
+	}
+
+	if err := services.EnsureLocalQdrant(cfg); err != nil {
+		return nil, fmt.Errorf("ensuring local qdrant: %w", err)
+	}
+	qdrantClient, err := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
+	if err != nil {
+		return nil, fmt.Errorf("creating qdrant client: %w", err)
+	}
+	defer qdrantClient.Close()
+
+	results, err := qdrantClient.Search(ctx, collection, vecs[0], overFetch(top), minScore, filters)
+	if err != nil {
+		return nil, fmt.Errorf("searching: %w", err)
+	}
+	return topN(collapseChunks(results), top), nil
 }
 
 // chunkFanout is how many extra candidates to request before collapsing chunks
