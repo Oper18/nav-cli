@@ -68,6 +68,9 @@ type HooksConfig struct {
 	CursorTopK       int     `mapstructure:"cursor_top_k"     yaml:"cursor_top_k"`
 	CursorMinScore   float64 `mapstructure:"cursor_min_score" yaml:"cursor_min_score"`
 	CursorMaxTokens  int     `mapstructure:"cursor_max_tokens" yaml:"cursor_max_tokens"`
+	OpenCodeTopK     int     `mapstructure:"opencode_top_k"   yaml:"opencode_top_k"`
+	OpenCodeMinScore float64 `mapstructure:"opencode_min_score" yaml:"opencode_min_score"`
+	OpenCodeMaxTokens int    `mapstructure:"opencode_max_tokens" yaml:"opencode_max_tokens"`
 }
 
 // Config is the root configuration structure.
@@ -156,6 +159,9 @@ func Load() (*Config, error) {
 	v.SetDefault("hooks.cursor_top_k", 5)             // Default to same as Claude and Qwen
 	v.SetDefault("hooks.cursor_min_score", 0.72)      // Default to same as Claude and Qwen
 	v.SetDefault("hooks.cursor_max_tokens", 4000)     // Default to same as Claude and Qwen
+	v.SetDefault("hooks.opencode_top_k", 5)           // Default to same as Claude, Qwen, and Cursor
+	v.SetDefault("hooks.opencode_min_score", 0.72)    // Default to same as Claude, Qwen, and Cursor
+	v.SetDefault("hooks.opencode_max_tokens", 4000)   // Default to same as Claude, Qwen, and Cursor
 
 	// Config file location
 	v.SetConfigName("config")
@@ -313,6 +319,9 @@ func WriteDefault() error {
 			CursorTopK:      5,
 			CursorMinScore:  0.4,
 			CursorMaxTokens: 4000,
+			OpenCodeTopK:    5,
+			OpenCodeMinScore: 0.4,
+			OpenCodeMaxTokens: 4000,
 		},
 	}
 
