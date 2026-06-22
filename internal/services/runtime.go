@@ -116,6 +116,22 @@ func (r *Runtime) Start(name string) error {
 	return cmd.Run()
 }
 
+// Stop gracefully stops a running container.
+func (r *Runtime) Stop(name string) error {
+	cmd := exec.Command(r.Cmd, "stop", name)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// Restart stops and then starts a container.
+func (r *Runtime) Restart(name string) error {
+	cmd := exec.Command(r.Cmd, "restart", name)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 // Run creates and starts a new detached container according to opts.
 func (r *Runtime) Run(opts RunOpts) error {
 	args := []string{"run", "-d", "--name", opts.Name}
