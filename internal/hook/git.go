@@ -17,9 +17,15 @@ nav hook run --type git --path "$(git rev-parse --show-toplevel)"
 exit 0
 `
 
-// Install writes the nav pre-commit hook to <repoPath>/.git/hooks/pre-commit.
+const gitPostMergeHookScript = `#!/usr/bin/env bash
+# nav post-merge hook
+nav hook run --type git-post-merge --path "$(git rev-parse --show-toplevel)"
+exit 0
+`
+
+// Install writes the nav pre-commit and post-merge hooks to <repoPath>/.git/hooks/.
 // It sets the skip env var name from cfg.Hooks.GitSkipEnv.
-// If a pre-commit hook already exists and is NOT a nav hook, it appends the nav call
+// If a hook already exists and is NOT a nav hook, it appends the nav call
 // rather than overwriting.
 func Install(repoPath string, cfg *config.Config) error {
 	gitDir := filepath.Join(repoPath, ".git")
@@ -32,7 +38,20 @@ func Install(repoPath string, cfg *config.Config) error {
 		return fmt.Errorf("creating hooks directory: %w", err)
 	}
 
-	hookPath := filepath.Join(hooksDir, "pre-commit")
+	if err := installHook(hooksDir, "pre-commit", "# nav-hook\n"+fmt.Sprintf(gitHookScript, cfg.Hooks.GitSkipEnv), "# nav-hook-append\nnav hook run --type git --path \"$(git rev-parse --show-toplevel)\"\n"); err != nil {
+		return fmt.Errorf("installing pre-commit hook: %w", err)
+	}
+
+	if err := installHook(hooksDir, "post-merge", "# nav-hook\n"+gitPostMergeHookScript, "# nav-hook-append\nnav hook run --type git-post-merge --path \"$(git rev-parse --show-toplevel)\"\n"); err != nil {
+		return fmt.Errorf("installing post-merge hook: %w", err)
+	}
+
+	return nil
+}
+
+// installHook writes or appends a nav hook script to the given hook file.
+func installHook(hooksDir, hookName, fullScript, appendBlock string) error {
+	hookPath := filepath.Join(hooksDir, hookName)
 
 	existing, err := os.ReadFile(hookPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -40,63 +59,72 @@ func Install(repoPath string, cfg *config.Config) error {
 	}
 
 	if os.IsNotExist(err) || len(existing) == 0 {
-		// No existing hook — write the full script with our marker on the first line.
-		script := "# nav-hook\n" + fmt.Sprintf(gitHookScript, cfg.Hooks.GitSkipEnv)
-		if err := os.WriteFile(hookPath, []byte(script), 0755); err != nil {
-			return fmt.Errorf("writing pre-commit hook: %w", err)
+		if err := os.WriteFile(hookPath, []byte(fullScript), 0755); err != nil {
+			return fmt.Errorf("writing %s hook: %w", hookName, err)
 		}
 		return nil
 	}
 
 	content := string(existing)
 
-	// Already a nav hook — nothing to do.
 	if strings.Contains(content, "# nav-hook") {
 		return nil
 	}
 
-	// Foreign hook — append our block.
 	appended := content
 	if !strings.HasSuffix(appended, "\n") {
 		appended += "\n"
 	}
-	appended += "\n# nav-hook-append\nnav hook run --type git --path \"$(git rev-parse --show-toplevel)\"\n"
+	appended += "\n" + appendBlock
 
 	if err := os.WriteFile(hookPath, []byte(appended), 0755); err != nil {
-		return fmt.Errorf("appending nav hook: %w", err)
+		return fmt.Errorf("appending nav %s hook: %w", hookName, err)
 	}
 	return nil
 }
 
-// Uninstall removes the nav pre-commit hook from <repoPath>/.git/hooks/pre-commit.
-// If the file was entirely nav-generated (contains the nav marker), it removes the file.
+// Uninstall removes the nav pre-commit and post-merge hooks from <repoPath>/.git/hooks/.
+// If a hook file was entirely nav-generated (contains the nav marker), it removes the file.
 // If it was appended, it removes only the nav lines.
 func Uninstall(repoPath string) error {
-	hookPath := filepath.Join(repoPath, ".git", "hooks", "pre-commit")
+	hooksDir := filepath.Join(repoPath, ".git", "hooks")
+
+	if err := uninstallHook(hooksDir, "pre-commit"); err != nil {
+		return fmt.Errorf("uninstalling pre-commit hook: %w", err)
+	}
+
+	if err := uninstallHook(hooksDir, "post-merge"); err != nil {
+		return fmt.Errorf("uninstalling post-merge hook: %w", err)
+	}
+
+	return nil
+}
+
+// uninstallHook removes the nav portion of a git hook file.
+func uninstallHook(hooksDir, hookName string) error {
+	hookPath := filepath.Join(hooksDir, hookName)
 
 	data, err := os.ReadFile(hookPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("reading pre-commit hook: %w", err)
+		return fmt.Errorf("reading %s hook: %w", hookName, err)
 	}
 
 	content := string(data)
 
-	// Entirely nav-owned — delete the file.
 	if strings.Contains(content, "# nav-hook\n") {
 		if err := os.Remove(hookPath); err != nil {
-			return fmt.Errorf("removing pre-commit hook: %w", err)
+			return fmt.Errorf("removing %s hook: %w", hookName, err)
 		}
 		return nil
 	}
 
-	// Appended block — strip from the marker to end of nav block.
 	if idx := strings.Index(content, "\n# nav-hook-append\n"); idx >= 0 {
 		trimmed := strings.TrimRight(content[:idx], "\n") + "\n"
 		if err := os.WriteFile(hookPath, []byte(trimmed), 0755); err != nil {
-			return fmt.Errorf("writing trimmed hook: %w", err)
+			return fmt.Errorf("writing trimmed %s hook: %w", hookName, err)
 		}
 	}
 
@@ -121,6 +149,24 @@ func StagedFiles(repoPath string) (changed []string, deleted []string, err error
 	deletedOut, err := runGit(repoPath, "diff", "--cached", "--name-only", "--diff-filter=D")
 	if err != nil {
 		return nil, nil, fmt.Errorf("git diff (deleted): %w", err)
+	}
+
+	changed = parseLines(changedOut)
+	deleted = parseLines(deletedOut)
+	return changed, deleted, nil
+}
+
+// MergedFiles returns files that changed during a merge (post-merge hook).
+// It uses ORIG_HEAD (set by git before the merge) to diff against HEAD.
+func MergedFiles(repoPath string) (changed []string, deleted []string, err error) {
+	changedOut, err := runGit(repoPath, "diff", "--name-only", "ORIG_HEAD", "HEAD", "--diff-filter=ACMRT")
+	if err != nil {
+		return nil, nil, fmt.Errorf("git diff (merged changed): %w", err)
+	}
+
+	deletedOut, err := runGit(repoPath, "diff", "--name-only", "ORIG_HEAD", "HEAD", "--diff-filter=D")
+	if err != nil {
+		return nil, nil, fmt.Errorf("git diff (merged deleted): %w", err)
 	}
 
 	changed = parseLines(changedOut)

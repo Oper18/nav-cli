@@ -66,7 +66,7 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 		if err := hook.Install(path, cfg); err != nil {
 			return fmt.Errorf("installing git hook: %w", err)
 		}
-		fmt.Printf("nav git hook installed in %s/.git/hooks/pre-commit\n", path)
+		fmt.Printf("nav git hooks installed in %s/.git/hooks/ (pre-commit + post-merge)\n", path)
 
 	case "claude":
 		project, _, err := resolveProject(args, hookInstallPath)
@@ -186,7 +186,7 @@ func runHookUninstall(cmd *cobra.Command, args []string) error {
 		if err := hook.Uninstall(path); err != nil {
 			return fmt.Errorf("uninstalling git hook: %w", err)
 		}
-		fmt.Printf("nav git hook removed from %s\n", path)
+		fmt.Printf("nav git hooks removed from %s/.git/hooks/ (pre-commit + post-merge)\n", path)
 
 	case "claude":
 		var settingsPath string
@@ -271,7 +271,7 @@ var hookRunCmd = &cobra.Command{
 }
 
 func init() {
-	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git", "claude", "qwen", "cursor", or "opencode" (required)`)
+	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git", "git-post-merge", "claude", "qwen", "cursor", or "opencode" (required)`)
 	hookRunCmd.Flags().StringVar(&hookRunPath, "path", ".", "Repository path (for git hooks)")
 	hookRunCmd.Flags().IntVar(&hookRunTop, "top", 5, "Number of results to inject (for claude, qwen, cursor, and opencode hooks)")
 	hookRunCmd.Flags().StringVar(&hookRunQuery, "query", "", "Query text (for claude, qwen, cursor, and opencode hooks)")
@@ -283,6 +283,9 @@ func runHookRun(cmd *cobra.Command, args []string) error {
 	switch hookRunType {
 	case "git":
 		return runHookRunGit(hookRunPath)
+
+	case "git-post-merge":
+		return runHookRunPostMerge(hookRunPath)
 
 	case "claude":
 		project, _, err := resolveProject(args, hookRunPath)
@@ -313,7 +316,7 @@ func runHookRun(cmd *cobra.Command, args []string) error {
 		return runHookRunOpenCode(project, hookRunQuery, hookRunTop) // Call dedicated OpenCode function
 
 	default:
-		return fmt.Errorf("unknown hook type %q; must be \"git\", \"claude\", \"qwen\", \"cursor\", or \"opencode\"", hookRunType)
+		return fmt.Errorf("unknown hook type %q; must be \"git\", \"git-post-merge\", \"claude\", \"qwen\", \"cursor\", or \"opencode\"", hookRunType)
 	}
 }
 
@@ -370,6 +373,63 @@ func runHookRunGit(repoPath string) error {
 	}
 
 	fmt.Printf("nav: updated %d symbols\n", len(changed))
+	return nil
+}
+
+// runHookRunPostMerge handles the git post-merge hook: re-indexes files that
+// changed during a merge (e.g. git pull) and removes deleted files from Qdrant.
+func runHookRunPostMerge(repoPath string) error {
+	changed, deleted, err := hook.MergedFiles(repoPath)
+	if err != nil {
+		return fmt.Errorf("reading merged files: %w", err)
+	}
+
+	if len(changed) == 0 && len(deleted) == 0 {
+		return nil
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		return fmt.Errorf("loading credentials: %w", err)
+	}
+
+	project := "default"
+	ctx := context.Background()
+
+	if len(changed) > 0 {
+		if err := indexSpecificFiles(ctx, project, repoPath, "", "", cfg.Indexing.Concurrency, false, changed, []string{}); err != nil {
+			fmt.Fprintf(os.Stderr, "nav: warn: re-indexing merged files: %v\n", err)
+		}
+	}
+
+	if len(deleted) > 0 {
+		collection := "nav_" + project
+		if qErr := services.EnsureLocalQdrant(cfg); qErr != nil {
+			fmt.Fprintf(os.Stderr, "nav: warn: ensuring local qdrant: %v\n", qErr)
+		}
+		qdrantClient, qErr := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
+		if qErr != nil {
+			fmt.Fprintf(os.Stderr, "nav: warn: creating qdrant client: %v\n", qErr)
+		} else {
+			defer qdrantClient.Close()
+			branch := currentBranch(repoPath)
+			ids, qErr := deletedFileIDs(ctx, qdrantClient, collection, branch, deleted)
+			if qErr != nil {
+				fmt.Fprintf(os.Stderr, "nav: warn: querying deleted files: %v\n", qErr)
+			}
+			if len(ids) > 0 {
+				if dErr := qdrantClient.Delete(ctx, collection, ids); dErr != nil {
+					fmt.Fprintf(os.Stderr, "nav: warn: deleting symbols: %v\n", dErr)
+				}
+			}
+		}
+	}
+
+	fmt.Printf("nav: updated %d symbols from merge\n", len(changed))
 	return nil
 }
 
