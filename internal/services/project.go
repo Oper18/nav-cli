@@ -1,4 +1,4 @@
-package cli
+package services
 
 import (
 	"fmt"
@@ -8,20 +8,22 @@ import (
 	"nav/config"
 )
 
-// resolveProject determines the project name and repository path for a command.
+// ResolveProject determines the project name and repository path for a
+// command.
 //
-// Both are optional. The project name comes from the first positional argument
-// when one is given; otherwise it defaults to the basename of the current
-// working directory. The repository path is resolved in priority order:
+// Both are optional. The project name comes from the first positional
+// argument when one is given; otherwise it defaults to the basename of the
+// current working directory. The repository path is resolved in priority
+// order:
 //
 //  1. the --path flag (pathFlag) when non-empty,
 //  2. the path registered for the project in ~/.nav-cli/projects.yaml,
 //  3. the current working directory.
 //
 // The returned path is always absolute. The resolved (name, path) pair is
-// persisted to projects.yaml so subsequent invocations can refer to the project
-// by name alone.
-func resolveProject(args []string, pathFlag string) (name, path string, err error) {
+// persisted to projects.yaml so subsequent invocations can refer to the
+// project by name alone.
+func ResolveProject(args []string, pathFlag string) (name, path string, err error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", "", fmt.Errorf("determining current directory: %w", err)

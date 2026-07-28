@@ -15,8 +15,8 @@ func TestBuildEmbedChunks_SmallFitsSingleChunk(t *testing.T) {
 	if len(chunks) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
-	if chunks[0].Content != normalizeContent(p.Content) {
-		t.Errorf("chunk content = %q, want %q", chunks[0].Content, normalizeContent(p.Content))
+	if chunks[0].Content != NormalizeContent(p.Content) {
+		t.Errorf("chunk content = %q, want %q", chunks[0].Content, NormalizeContent(p.Content))
 	}
 	if chunks[0].Text != BuildEmbedText(p) {
 		t.Errorf("single-chunk text should equal BuildEmbedText")
@@ -47,7 +47,7 @@ func TestBuildEmbedChunks_LargeSplitsAndStaysUnderBudget(t *testing.T) {
 	}
 
 	// ...and the chunk contents must reassemble the normalized code exactly.
-	if reassembled.String() != normalizeContent(body) {
+	if reassembled.String() != NormalizeContent(body) {
 		t.Errorf("reassembled content does not match original normalized body")
 	}
 }

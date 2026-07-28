@@ -1,3 +1,7 @@
+// Package db provides nav's two persistence backends: a Qdrant-backed
+// vector store (Client, delegating to internal/db/qdrant) for embedded
+// chunks, and a per-project SQLite store (DB, see sqlite.go) for the
+// chunk manifest and knowledge graph.
 package db
 
 import (
@@ -35,6 +39,11 @@ func (c *Client) CollectionExists(ctx context.Context, name string) (bool, error
 // already exist.
 func (c *Client) EnsureCollection(ctx context.Context, name string, dimension int) error {
 	return c.Qdrant.EnsureCollection(ctx, name, dimension)
+}
+
+// DeleteCollection drops the named collection and every point it holds.
+func (c *Client) DeleteCollection(ctx context.Context, name string) error {
+	return c.Qdrant.DeleteCollection(ctx, name)
 }
 
 // Upsert inserts or updates a batch of Points in the given collection.

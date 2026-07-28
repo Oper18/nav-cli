@@ -19,6 +19,11 @@ const minLines = 3
 // Symbol holds fully resolved metadata for one code symbol.
 type Symbol struct {
 	qdrant.Payload
+	// StartLine is the 1-based source line the symbol's definition starts on.
+	// It lives on Symbol rather than the embedded Payload because it is only
+	// needed by the knowledge graph (internal/parser/graph.go), and the
+	// Payload schema stored in Qdrant must not change.
+	StartLine uint32
 }
 
 // callKeywords are identifiers that should not be treated as function calls.
@@ -188,6 +193,7 @@ func ExtractSymbols(ctx context.Context, repoRoot, filePath, branch string) ([]S
 				LastModified: lastMod,
 				Branch:       branch,
 			},
+			StartLine: raw.StartLine + 1, // tree-sitter rows are 0-based
 		}
 		symbols = append(symbols, sym)
 	}

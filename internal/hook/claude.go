@@ -31,60 +31,83 @@ type ContextResult struct {
 	Code    string
 }
 
-// InstallClaude writes the nav hook into Claude Code settings.json.
-// settingsPath is the full path to the settings.json file.
-// project is the nav project name. topK is how many results to inject.
-func InstallClaude(settingsPath, project string, topK int) error {
+// claudeUserPromptMarker and claudeSessionStartMarker distinguish nav's two
+// Claude Code hook commands in settings.json so each can be detected and
+// uninstalled independently. The trailing/leading spaces matter: both
+// commands contain the substring "claude", and the UserPromptSubmit one's
+// marker must not accidentally match the SessionStart command too.
+const (
+	claudeUserPromptMarker   = "--type claude "
+	claudeSessionStartMarker = "--type claude-session-start"
+)
+
+// InstallClaude writes nav's UserPromptSubmit (context injection) and
+// SessionStart (knowledge-graph summary injection) hooks into Claude Code
+// settings.json. settingsPath is the full path to the settings.json file.
+// project is the nav project name. topK is how many search results the
+// UserPromptSubmit hook injects. It returns installed=false when both hooks
+// were already present, so callers can tell a no-op apart from a fresh
+// install, and leaves settings.json untouched in that case.
+func InstallClaude(settingsPath, project string, topK int) (installed bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
-		return fmt.Errorf("creating settings directory: %w", err)
+		return false, fmt.Errorf("creating settings directory: %w", err)
 	}
 
 	settings, err := readSettingsJSON(settingsPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	// Navigate to hooks.UserPromptSubmit, creating as needed.
+	promptCommand := fmt.Sprintf(
+		"nav hook run %s --type claude --top %d --query \"$CLAUDE_USER_PROMPT\"",
+		project, topK,
+	)
+	promptAdded := addClaudeHookEntry(settings, "UserPromptSubmit", promptCommand, claudeUserPromptMarker)
+
+	sessionStartCommand := fmt.Sprintf("nav hook run %s --type claude-session-start", project)
+	sessionAdded := addClaudeHookEntry(settings, "SessionStart", sessionStartCommand, claudeSessionStartMarker)
+
+	if !promptAdded && !sessionAdded {
+		return false, nil // already installed
+	}
+
+	if err := writeSettingsJSON(settingsPath, settings); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// addClaudeHookEntry registers command under hooks.<event> in settings,
+// unless an entry containing marker is already present, in which case it
+// reports false without modifying settings.
+func addClaudeHookEntry(settings map[string]interface{}, event, command, marker string) bool {
 	hooks, _ := settings["hooks"].(map[string]interface{})
 	if hooks == nil {
 		hooks = make(map[string]interface{})
 		settings["hooks"] = hooks
 	}
 
-	navCommand := fmt.Sprintf(
-		"nav hook run %s --type claude --top %d --query \"$CLAUDE_USER_PROMPT\"",
-		project, topK,
-	)
-
-	// Check if already installed.
-	existing, _ := hooks["UserPromptSubmit"].([]interface{})
+	existing, _ := hooks[event].([]interface{})
 	for _, raw := range existing {
-		entry, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if entryContainsNavClaude(entry) {
-			return nil // already installed
+		if entry, ok := raw.(map[string]interface{}); ok && entryContainsCommand(entry, marker) {
+			return false // already installed
 		}
 	}
 
-	// Build the new entry as a plain map so it round-trips cleanly.
 	newEntry := map[string]interface{}{
 		"matcher": "",
 		"hooks": []interface{}{
 			map[string]interface{}{
 				"type":    "command",
-				"command": navCommand,
+				"command": command,
 			},
 		},
 	}
-
-	hooks["UserPromptSubmit"] = append(existing, newEntry)
-
-	return writeSettingsJSON(settingsPath, settings)
+	hooks[event] = append(existing, newEntry)
+	return true
 }
 
-// UninstallClaude removes the nav hook from Claude Code settings.json.
+// UninstallClaude removes both nav hooks from Claude Code settings.json.
 func UninstallClaude(settingsPath string) error {
 	settings, err := readSettingsJSON(settingsPath)
 	if err != nil {
@@ -99,21 +122,26 @@ func UninstallClaude(settingsPath string) error {
 		return nil
 	}
 
-	existing, ok := hooks["UserPromptSubmit"].([]interface{})
-	if !ok {
-		return nil
-	}
+	removeClaudeHookEntry(hooks, "UserPromptSubmit", claudeUserPromptMarker)
+	removeClaudeHookEntry(hooks, "SessionStart", claudeSessionStartMarker)
 
+	return writeSettingsJSON(settingsPath, settings)
+}
+
+// removeClaudeHookEntry drops every hooks.<event> entry containing marker.
+func removeClaudeHookEntry(hooks map[string]interface{}, event, marker string) {
+	existing, ok := hooks[event].([]interface{})
+	if !ok {
+		return
+	}
 	filtered := make([]interface{}, 0, len(existing))
 	for _, raw := range existing {
 		entry, ok := raw.(map[string]interface{})
-		if !ok || !entryContainsNavClaude(entry) {
+		if !ok || !entryContainsCommand(entry, marker) {
 			filtered = append(filtered, raw)
 		}
 	}
-
-	hooks["UserPromptSubmit"] = filtered
-	return writeSettingsJSON(settingsPath, settings)
+	hooks[event] = filtered
 }
 
 // DefaultSettingsPath returns the path to .claude/settings.json in dir.
@@ -203,8 +231,9 @@ func writeSettingsJSON(path string, settings map[string]interface{}) error {
 	return nil
 }
 
-// entryContainsNavClaude reports whether a raw hook entry map contains the nav Claude command.
-func entryContainsNavClaude(entry map[string]interface{}) bool {
+// entryContainsCommand reports whether a raw hook entry map contains a
+// command matching marker.
+func entryContainsCommand(entry map[string]interface{}, marker string) bool {
 	hookList, ok := entry["hooks"].([]interface{})
 	if !ok {
 		return false
@@ -214,7 +243,7 @@ func entryContainsNavClaude(entry map[string]interface{}) bool {
 		if !ok {
 			continue
 		}
-		if cmd, _ := hm["command"].(string); strings.Contains(cmd, "nav hook run --type claude") {
+		if cmd, _ := hm["command"].(string); strings.Contains(cmd, marker) {
 			return true
 		}
 	}

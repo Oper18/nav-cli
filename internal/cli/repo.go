@@ -1,16 +1,9 @@
 package cli
 
 import (
-	"bufio"
-	"context"
 	"fmt"
-	"os"
-	"os/exec"
-	"strings"
 
 	"github.com/spf13/cobra"
-	"nav/config"
-	"nav/internal/db"
 	"nav/internal/services"
 )
 
@@ -34,13 +27,7 @@ var repoFetchCmd = &cobra.Command{
 }
 
 func runRepoFetch(cmd *cobra.Command, args []string) error {
-	c := exec.Command("git", "fetch", "--all", "--prune")
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("git fetch --all --prune: %w", err)
-	}
-	return nil
+	return services.FetchAll(".")
 }
 
 // ---------------------------------------------------------------------------
@@ -70,84 +57,17 @@ func init() {
 }
 
 func runRepoCleanBranches(cmd *cobra.Command, args []string) error {
-	repoCleanProject, repoPath, err := resolveProject(args, repoCleanPath)
+	project, repoPath, err := services.ResolveProject(args, repoCleanPath)
 	if err != nil {
 		return err
 	}
 
-	out, err := exec.Command("git", "-C", repoPath, "branch", "-vv").Output()
+	cleaned, err := services.CleanGoneBranches(cmd.Context(), project, repoPath, repoCleanCollection)
 	if err != nil {
-		return fmt.Errorf("git branch -vv: %w", err)
+		return err
 	}
-
-	var gone []string
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.Contains(line, ": gone]") {
-			continue
-		}
-		// Strip the leading "* " marker on the current branch, then take the
-		// first whitespace-separated token as the branch name.
-		line = strings.TrimPrefix(strings.TrimSpace(line), "* ")
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		gone = append(gone, fields[0])
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("parsing branch list: %w", err)
-	}
-
-	if len(gone) == 0 {
+	if len(cleaned) == 0 {
 		fmt.Println("No branches with gone upstream.")
-		return nil
-	}
-
-	// Resolve config and connect to Qdrant.
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return fmt.Errorf("loading credentials: %w", err)
-	}
-
-	collection := repoCleanCollection
-	if collection == "" {
-		collection = "nav_" + repoCleanProject
-	}
-
-	if err := services.EnsureLocalQdrant(cfg); err != nil {
-		return fmt.Errorf("ensuring local qdrant: %w", err)
-	}
-	qdrantClient, err := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
-	if err != nil {
-		return fmt.Errorf("creating qdrant client: %w", err)
-	}
-	defer qdrantClient.Close()
-
-	ctx := cmd.Context()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	// Purge points for each gone branch before deleting the git branch.
-	for _, branch := range gone {
-		if err := qdrantClient.DeleteByFilter(ctx, collection, map[string]string{"branch": branch}); err != nil {
-			return fmt.Errorf("purging qdrant points for branch %q: %w", branch, err)
-		}
-		fmt.Printf("Purged qdrant points for branch %q\n", branch)
-	}
-
-	deleteArgs := append([]string{"-C", repoPath, "branch", "-D"}, gone...)
-	c := exec.Command("git", deleteArgs...)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("git branch -D: %w", err)
 	}
 	return nil
 }

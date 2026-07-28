@@ -25,6 +25,7 @@ func init() {
 	rootCmd.AddCommand(indexCmd)
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(syncCmd)
+	rootCmd.AddCommand(graphCmd)
 	rootCmd.AddCommand(hookCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(repoCmd)

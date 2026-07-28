@@ -177,7 +177,8 @@ func ParseFile(ctx context.Context, lang string, sourceCode []byte) ([]RawSymbol
 
 		switch {
 		case caps["definition"] != nil && caps["struct_definition"] == nil && caps["class_definition"] == nil &&
-			caps["interface_definition"] == nil && caps["enum_definition"] == nil && caps["trait_definition"] == nil:
+			caps["interface_definition"] == nil && caps["enum_definition"] == nil && caps["trait_definition"] == nil &&
+			caps["const_definition"] == nil:
 			defNode = caps["definition"]
 			// function or method — determined later.
 			symType = "function"
@@ -196,6 +197,9 @@ func ParseFile(ctx context.Context, lang string, sourceCode []byte) ([]RawSymbol
 		case caps["trait_definition"] != nil:
 			defNode = caps["trait_definition"]
 			symType = "trait"
+		case caps["const_definition"] != nil:
+			defNode = caps["const_definition"]
+			symType = "const"
 		default:
 			// Pattern has @definition nested inside impl_item — the @definition
 			// capture for the inner function_item fires here.

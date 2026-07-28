@@ -2,7 +2,7 @@
 
 CLI tool for parsing source code repositories into semantically rich, searchable code units — and keeping them fresh as the codebase evolves.
 
-`nav` slices a repository into functions, methods, and classes using tree-sitter, enriches each unit with an LLM-generated summary via OpenRouter, converts the result into vector embeddings, and stores everything in Qdrant. Two integration points keep the index alive: a git pre-commit hook that patches changed symbols on every commit, and a Claude Code hook that injects relevant code context into every AI-assisted session.
+`nav` slices a repository into functions, methods, and classes using tree-sitter, enriches each unit with an LLM-generated summary via OpenRouter, converts the result into vector embeddings, and stores everything in Qdrant. Two integration points keep the index alive: git hooks (pre-commit, pre-push, and every flavor of pull) that patch changed symbols as they happen, and a Claude Code hook that injects relevant code context into every AI-assisted session.
 
 ---
 
@@ -118,9 +118,11 @@ nav/
 ├── internal/
 │   ├── cli/
 │   │   ├── root.go                # cobra root command, persistent flags
-│   │   ├── index.go               # nav index
+│   │   ├── index.go               # nav index (also: embedAndUpsertSymbols, shared with lazysync.go)
 │   │   ├── search.go              # nav search
-│   │   ├── sync.go                # nav sync (reprocess missed commits)
+│   │   ├── sync.go                # nav sync (lazy path by default; --since replays missed commits)
+│   │   ├── lazysync.go            # lazy re-embedding: change detection, manifest diff, graph rebuild
+│   │   ├── graph.go                # nav graph summary|callers|deps|symbol
 │   │   ├── hook.go                # nav hook install|uninstall|run
 │   │   └── config.go              # nav config show|set|init
 │   │
@@ -140,13 +142,18 @@ nav/
 │   │   ├── qwen.go                # Qwen3 Embedding (0.6B / 8B)
 │   │   └── openai.go              # text-embedding-3-small
 │   │
-│   ├── store/
-│   │   ├── qdrant.go              # Qdrant upsert, search, delete
-│   │   └── schema.go              # CodeUnit and Payload types
+│   ├── db/
+│   │   ├── db.go                  # domain client, delegates to qdrant
+│   │   ├── qdrant/qdrant.go       # Qdrant upsert, search, delete, ID/payload encoding
+│   │   ├── sqlite.go              # per-branch SQLite state: open/migrate/reset (modernc.org/sqlite + morph), meta table
+│   │   ├── lock.go                # flock-based single-writer lock (.nav/lock)
+│   │   ├── chunks.go              # manifest CRUD (content_hash/embedded_hash per chunk)
+│   │   ├── graph.go               # nodes/edges CRUD + queries (callers, deps, fan-in)
+│   │   └── migrations/            # embedded SQL schema migrations
 │   │
 │   ├── hook/
-│   │   ├── git.go                 # install/uninstall/run git pre-commit hook
-│   │   └── claude.go              # install/uninstall/run Claude Code hook
+│   │   ├── git.go                 # install/uninstall/run git pre-commit/pre-push/post-merge/post-rewrite/reference-transaction hooks
+│   │   └── claude.go              # install/uninstall/run Claude Code hooks (prompt + session start)
 │   │
 │   └── config/
 │       └── config.go              # load/save ~/.nav-cli/config.yaml via viper
@@ -155,6 +162,14 @@ nav/
 ├── go.sum
 └── README.md
 ```
+
+Per-project state lives under `<repo-root>/.nav/` (gitignored): each branch
+gets its own `nav-<branch>.db`, holding that branch's chunk manifest and
+knowledge graph — what files and symbols exist can differ meaningfully
+between branches, so they're never shared. `lock` is the single-writer
+flock `nav sync` takes so overlapping hook invocations don't race (shared
+across branches, since only one is checked out in a given working tree at a
+time).
 
 ---
 
@@ -216,7 +231,7 @@ indexing:
   min_lines: 3                   # skip symbols shorter than N lines
 
 hooks:
-  git_skip_env: NAV_SKIP         # env var checked by the pre-commit hook
+  git_skip_env: NAV_SKIP         # env var checked by the pre-commit and pre-push hooks
   claude_top_k: 5                # how many results to inject into Claude context
 ```
 
@@ -447,38 +462,90 @@ nav search --project mokosh "database connection pool" --json
 
 ### `nav sync`
 
-Re-process commits whose changed files were not indexed (e.g. when `NAV_SKIP=1` was set, or the hook was not yet installed).
+With no flags, `nav sync` is the fast, idempotent lazy re-embedding path — the
+same thing the `UserPromptSubmit` hook runs in-process before every prompt.
+It keeps a per-branch SQLite manifest at `.nav/nav-<branch>.db` (content hash
+per embedded chunk); each run detects files changed since the last sync (via
+`git status` and any HEAD movement, or file mtimes outside a git repo),
+re-parses only those, and re-embeds only the chunks whose content hash
+actually changed. With nothing dirty it's a near no-op (one `git status`
+call). It prints a one-line summary:
 
 ```
-nav sync --project <name> --path <repo-root> [flags]
+synced: 3 chunks re-embedded, 0 removed
+```
+
+```
+nav sync [project] [flags]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--since` | last sync | git revision or ISO date from which to replay |
-| `--dry-run` | false | show which commits would be processed |
+| `--path` | project's registered path, or cwd | repository root |
+| `--since` | (unset) | switches to commit-log replay mode instead (see below) |
+| `--dry-run` | false | show what would change without doing it |
+
+`--since` switches to the older commit-log replay mode: it walks `git log`
+for commits after the given date (or ref) and unconditionally re-indexes
+every file they touched, ignoring the manifest. This is for catching up
+commits made with `NAV_SKIP=1` set, or before the git hook was installed —
+not routine use.
 
 ```bash
-nav sync --project mokosh --path ~/work/mokosh --since 2024-01-01
-nav sync --project mokosh --path ~/work/mokosh --since HEAD~10
+nav sync                                          # lazy path (same as the hook)
+nav sync mokosh --path ~/work/mokosh --since 2024-01-01
+nav sync mokosh --path ~/work/mokosh --since HEAD~10
 ```
 
-`sync` reads the git log, identifies files changed in each commit, re-extracts symbols from those files, and upserts into Qdrant. It is idempotent — re-running is always safe.
+Both modes are idempotent — re-running is always safe.
+
+---
+
+### `nav graph`
+
+Plain-text, LLM-oriented queries against the knowledge graph `nav sync`
+builds alongside the manifest in the same per-branch `.nav/nav-<branch>.db`:
+packages, files, and symbols (func/method/type/const) as nodes, and
+`defines`/`imports`/`calls`/`implements`/`embeds` relationships as edges.
+The graph reflects whatever the *current* branch's code looks like — switch
+branches and `nav graph`/`nav sync` follow along, since each branch has its
+own file. Reads only from SQLite — no re-parsing, no network calls.
+
+```
+nav graph summary [project] [--path <repo-root>]
+nav graph callers <symbol> [project] [--depth N]     # default depth 1
+nav graph deps <package|file> [project] [--depth N]  # default depth 3
+nav graph symbol <name> [project]
+```
+
+`nav graph summary` renders a ~1000-token digest — packages with a one-line
+responsibility (reusing each package's already-summarised symbols, no new
+LLM calls), entry points, and the top-10 most-called symbols by fan-in — and
+caches it, regenerating only when the graph has actually changed since the
+digest was last built. It's what gets injected on Claude Code's
+`SessionStart` hook (see below).
 
 ---
 
 ### `nav hook`
 
-Manage git and Claude Code hook installation.
+Manage git, Claude Code, Qwen Code, Cursor, and OpenCode hook installation.
 
 ```
-nav hook install   --type git    --project <name> --path <repo-root>
-nav hook install   --type claude --project <name>
-nav hook uninstall --type git    --path <repo-root>
-nav hook uninstall --type claude --project <name>
-nav hook run       --type git    --path <repo-root>   # called by the hook itself
-nav hook run       --type claude --query <text>        # called by the Claude hook
+nav hook install   [project] --type git    --path <repo-root>
+nav hook install   [project] --type claude
+nav hook uninstall          --type git    --path <repo-root>
+nav hook uninstall          --type claude
+nav hook run        [project] --type git                   --path <repo-root>   # called by the git hook itself
+nav hook run        [project] --type claude                --query <text>       # called on UserPromptSubmit
+nav hook run        [project] --type claude-session-start                        # called on SessionStart
 ```
+
+Installing the `claude` hook type registers both a `UserPromptSubmit` entry
+(embeds the query, searches Qdrant, injects a `<nav-context>` block — and
+first runs `nav sync`'s lazy path in-process so results reflect any
+just-made edits) and a `SessionStart` entry (injects `nav graph summary`'s
+digest, so a new session starts already oriented in the codebase).
 
 ---
 
@@ -659,16 +726,76 @@ Or point `qdrant.url` at any Qdrant Cloud instance.
 
 ## Git Hook Integration
 
-The git pre-commit hook keeps the Qdrant index in sync with every commit automatically.
+nav installs five git hooks that keep the Qdrant index and local knowledge
+graph in sync automatically, on every commit, every push, *and* every way of
+pulling changes in — plain, `--ff-only` (the common case when you're just
+catching up), true merge, or `--rebase`:
+
+| Hook | Fires on | Action |
+|---|---|---|
+| `pre-commit` | `git commit` | re-parses and upserts only the staged files |
+| `pre-push` | `git push`, before the commits leave the machine | runs the lazy sync (`nav sync`), validating every chunk's content hash against the manifest first — anything already up to date is skipped, not re-embedded |
+| `post-merge` | `git merge` producing an actual merge commit (and therefore `git pull` when it isn't a fast-forward) | runs the lazy sync (`nav sync`) |
+| `post-rewrite` | `git rebase` (reason `rebase`), and therefore `git pull --rebase` when it actually replays commits | runs the lazy sync (`nav sync`) |
+| `reference-transaction` | any update to the checked-out branch's own ref | runs the lazy sync (`nav sync`) |
+
+Every one of these hooks funnels into the same lazy sync (`services.LazySync`),
+which is what makes both halves of this cheap and correct: it diffs the
+working tree and, when `HEAD` has moved since the last sync, the commit range
+too, then re-parses only the files that touched and re-embeds only the
+symbols whose content hash actually changed. A chunk whose hash matches what
+the manifest already has is left alone — that's the "skip if already
+up to date" behavior `pre-push` relies on to stay a near no-op on repeated
+pushes. On the pull side, `post-merge`/`post-rewrite`/`reference-transaction`
+diff against the last synced `HEAD`, so every object touched by the incoming
+commits gets revalidated and, where it's actually dirty, re-embedded and
+written back to both Qdrant and the local SQLite state — never silently
+missed just because the pull happened to be a fast-forward.
+
+`post-merge` and `post-rewrite` sound like they should cover every `git
+pull`, but they don't: git skips its merge/rebase machinery entirely for a
+pure fast-forward — the single most common pull of all, when you have no
+local commits of your own — so neither hook fires for it.
+`reference-transaction` is what actually closes that gap: it fires after
+*any* ref update, fast-forward included, so between the three pull-side
+hooks, every flavor of `git pull` really does end up triggering a sync. It's
+filtered to the checked-out branch's own ref (or `HEAD`) so a plain `git
+fetch` — which only moves remote-tracking refs — stays quiet, and it also
+means switching branches (`git checkout`/`git switch`) proactively syncs the
+branch you just moved to, which fits naturally with the graph being
+per-branch (see [Directory Layout](#directory-layout)).
 
 ### How it works
 
-1. `git commit` triggers `.git/hooks/pre-commit`.
-2. The hook calls `nav hook run --type git --path .`.
-3. `nav` reads `git diff --cached --name-only` to get the list of staged files.
-4. For each changed file, it re-parses symbols and upserts updated points into Qdrant.
-5. Symbols from deleted files are removed from Qdrant.
-6. The hook exits 0 — it never blocks the commit.
+1. `git commit` triggers `.git/hooks/pre-commit`, which calls
+   `nav hook run --type git --path .`: `nav` reads
+   `git diff --cached --name-only` for the staged files, re-parses and
+   upserts them into Qdrant, and removes symbols from deleted files. It
+   exits 0 either way — it never blocks the commit.
+2. `git push` triggers `.git/hooks/pre-push` before any commits leave the
+   machine, which calls `nav hook run --type git-pre-push --path .`: this
+   runs the same lazy sync, so every chunk gets validated against the
+   manifest's content hash first. Content whose hash is unchanged since the
+   last sync is skipped outright rather than re-embedded; only what's
+   actually dirty (e.g. commits made with `NAV_SKIP=1`, or from another
+   machine) gets processed. It never blocks the push.
+3. A real `git merge` (a merge commit, not a fast-forward) triggers
+   `.git/hooks/post-merge`, which calls
+   `nav hook run --type git-post-merge --path .`: this runs the same lazy
+   sync `nav sync` does, detecting every file that changed since the last
+   sync (via the commit range, not just the merge itself), revalidating each
+   one against the manifest, and re-embedding only what's dirty.
+4. An actual `git rebase` replay triggers `.git/hooks/post-rewrite` with
+   `$1=rebase`; the hook forwards to the same `git-post-merge` run type as
+   above. `git commit --amend` also fires `post-rewrite`, but with
+   `$1=amend`, which the hook ignores.
+5. Any update to the checked-out branch's own ref (or `HEAD`) — a
+   fast-forward pull, a merge, a rebase, a commit, a branch switch — fires
+   `.git/hooks/reference-transaction` with a `committed` transaction state
+   and the updated ref on stdin; the hook checks the ref against
+   `refs/heads/$(git rev-parse --abbrev-ref HEAD)` (or a literal `HEAD`)
+   before forwarding to `git-post-merge` too, so it ignores `git fetch`
+   updating only `refs/remotes/...`.
 
 ### Installation
 
@@ -676,15 +803,53 @@ The git pre-commit hook keeps the Qdrant index in sync with every commit automat
 nav hook install --type git --project mokosh --path ~/work/mokosh
 ```
 
-This writes `.git/hooks/pre-commit` in the target repository:
+This writes `.git/hooks/pre-commit`, `.git/hooks/pre-push`,
+`.git/hooks/post-merge`, `.git/hooks/post-rewrite`, and
+`.git/hooks/reference-transaction` in the target repository:
 
 ```bash
 #!/usr/bin/env bash
+# pre-commit
 [ -n "$NAV_SKIP" ] && exit 0
 nav hook run --type git --path "$(git rev-parse --show-toplevel)"
 ```
 
-The hook is installed per-repository and does not affect other repos.
+```bash
+#!/usr/bin/env bash
+# pre-push
+[ -n "$NAV_SKIP" ] && exit 0
+nav hook run --type git-pre-push --path "$(git rev-parse --show-toplevel)"
+```
+
+```bash
+#!/usr/bin/env bash
+# post-merge
+nav hook run --type git-post-merge --path "$(git rev-parse --show-toplevel)"
+```
+
+```bash
+#!/usr/bin/env bash
+# post-rewrite
+[ "$1" = "rebase" ] || exit 0
+nav hook run --type git-post-merge --path "$(git rev-parse --show-toplevel)"
+```
+
+```bash
+#!/usr/bin/env bash
+# reference-transaction
+[ "$1" = "committed" ] || exit 0
+branch="refs/heads/$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+while read -r old new ref; do
+  if [ "$ref" = "$branch" ] || [ "$ref" = "HEAD" ]; then
+    nav hook run --type git-post-merge --path "$(git rev-parse --show-toplevel)"
+    exit 0
+  fi
+done
+```
+
+Each hook is installed per-repository and does not affect other repos. If a
+hook file already exists and isn't nav's, nav appends its call rather than
+overwriting the file.
 
 ### Skipping the hook
 
@@ -694,7 +859,7 @@ The hook respects the `NAV_SKIP` environment variable (configurable via `hooks.g
 NAV_SKIP=1 git commit -m "wip: scratch work"
 ```
 
-This is the equivalent of `--no-verify` for nav. Commits made with `NAV_SKIP=1` can be reprocessed later with `nav sync`.
+This is the equivalent of `--no-verify` for nav. Commits made with `NAV_SKIP=1` can be reprocessed later with `nav sync`. Setting it also skips the `pre-push` hook (`NAV_SKIP=1 git push`), for the same reason.
 
 ### Replaying skipped commits
 
@@ -710,7 +875,10 @@ nav sync --project mokosh --path ~/work/mokosh --since HEAD~5
 nav hook uninstall --type git --path ~/work/mokosh
 ```
 
-Removes the `.git/hooks/pre-commit` file. Does not touch the Qdrant index.
+Removes the nav portion of `.git/hooks/pre-commit`, `pre-push`, `post-merge`,
+`post-rewrite`, and `reference-transaction` (the whole file if nav owned it
+outright, or just nav's appended lines if it was layered onto an existing
+hook). Does not touch the Qdrant index.
 
 ---
 
@@ -720,10 +888,18 @@ The Claude Code hook injects semantically relevant code units into every AI sess
 
 ### How it works
 
+**Session start:** the `SessionStart` hook fires once per session and calls
+`nav hook run --type claude-session-start`, which prints `nav graph
+summary`'s cached digest — packages, entry points, top-called symbols — so
+Claude starts oriented in the codebase before it reads a single file.
+
+**Every prompt:**
+
 1. The user sends a message to Claude Code inside a project.
-2. The `PreToolUse` or `UserPromptSubmit` Claude Code hook fires and calls `nav hook run --type claude --query "<user message>"`.
-3. `nav` embeds the query, searches Qdrant for the top-K most relevant symbols, and writes a context block to stdout.
-4. Claude Code injects that block into the conversation context before processing the user's request.
+2. The `UserPromptSubmit` hook fires and calls `nav hook run --type claude --query "<user message>"`.
+3. `nav` first runs the lazy sync path in-process (§ `nav sync`) so the index reflects any edits made since the last prompt — a near no-op when nothing changed.
+4. `nav` embeds the query, searches Qdrant for the top-K most relevant symbols, and writes a context block to stdout.
+5. Claude Code injects that block into the conversation context before processing the user's request.
 
 ### Installation
 
@@ -832,6 +1008,10 @@ go build -o nav ./cmd
 | `github.com/smacker/go-tree-sitter` | Tree-sitter Go bindings |
 | `github.com/qdrant/go-client` | Qdrant gRPC client |
 | `gopkg.in/yaml.v3` | YAML config serialisation |
+| `modernc.org/sqlite` | Pure-Go SQLite driver for `.nav/nav-<branch>.db` (no cgo) |
+| `github.com/mattermost/morph` | SQLite schema migrations for `internal/db` |
+| `github.com/cespare/xxhash/v2` | Content hashing for the chunk manifest |
+| `golang.org/x/sys` | `flock` for the single-writer sync lock |
 
 ### Adding a new language
 

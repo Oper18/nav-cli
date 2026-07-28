@@ -3,14 +3,10 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 	"nav/config"
-	"nav/internal/db"
 	"nav/internal/hook"
-	"nav/internal/llm"
 	"nav/internal/services"
 )
 
@@ -63,13 +59,18 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 		if path == "" {
 			path = "."
 		}
-		if err := hook.Install(path, cfg); err != nil {
+		installed, err := hook.Install(path, cfg)
+		if err != nil {
 			return fmt.Errorf("installing git hook: %w", err)
 		}
-		fmt.Printf("nav git hooks installed in %s/.git/hooks/ (pre-commit + post-merge)\n", path)
+		if installed {
+			fmt.Printf("nav git hooks installed in %s/.git/hooks/ (pre-commit + pre-push + post-merge + post-rewrite + reference-transaction)\n", path)
+		} else {
+			fmt.Printf("nav git hooks already installed in %s/.git/hooks/, skipping\n", path)
+		}
 
 	case "claude":
-		project, _, err := resolveProject(args, hookInstallPath)
+		project, _, err := services.ResolveProject(args, hookInstallPath)
 		if err != nil {
 			return err
 		}
@@ -84,13 +85,18 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 			settingsPath = hook.DefaultSettingsPath(dir)
 		}
 		topK := cfg.Hooks.ClaudeTopK
-		if err := hook.InstallClaude(settingsPath, project, topK); err != nil {
+		installed, err := hook.InstallClaude(settingsPath, project, topK)
+		if err != nil {
 			return fmt.Errorf("installing Claude hook: %w", err)
 		}
-		fmt.Printf("nav Claude hook installed in %s\n", settingsPath)
+		if installed {
+			fmt.Printf("nav Claude hook installed in %s\n", settingsPath)
+		} else {
+			fmt.Printf("nav Claude hook already installed in %s, skipping\n", settingsPath)
+		}
 
 	case "qwen":
-		project, _, err := resolveProject(args, hookInstallPath)
+		project, _, err := services.ResolveProject(args, hookInstallPath)
 		if err != nil {
 			return err
 		}
@@ -105,13 +111,18 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 			settingsPath = hook.QwenDefaultSettingsPath(dir)
 		}
 		topK := cfg.Hooks.QwenTopK // Use Qwen-specific configuration
-		if err := hook.InstallQwen(settingsPath, project, topK); err != nil {
+		installed, err := hook.InstallQwen(settingsPath, project, topK)
+		if err != nil {
 			return fmt.Errorf("installing Qwen hook: %w", err)
 		}
-		fmt.Printf("nav Qwen hook installed in %s\n", settingsPath)
+		if installed {
+			fmt.Printf("nav Qwen hook installed in %s\n", settingsPath)
+		} else {
+			fmt.Printf("nav Qwen hook already installed in %s, skipping\n", settingsPath)
+		}
 
 	case "cursor":
-		project, _, err := resolveProject(args, hookInstallPath)
+		project, _, err := services.ResolveProject(args, hookInstallPath)
 		if err != nil {
 			return err
 		}
@@ -126,13 +137,18 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 			settingsPath = hook.CursorDefaultSettingsPath(dir)
 		}
 		topK := cfg.Hooks.CursorTopK
-		if err := hook.InstallCursor(settingsPath, project, topK); err != nil {
+		installed, err := hook.InstallCursor(settingsPath, project, topK)
+		if err != nil {
 			return fmt.Errorf("installing Cursor hook: %w", err)
 		}
-		fmt.Printf("nav Cursor hook installed in %s\n", settingsPath)
+		if installed {
+			fmt.Printf("nav Cursor hook installed in %s\n", settingsPath)
+		} else {
+			fmt.Printf("nav Cursor hook already installed in %s, skipping\n", settingsPath)
+		}
 
 	case "opencode":
-		project, _, err := resolveProject(args, hookInstallPath)
+		project, _, err := services.ResolveProject(args, hookInstallPath)
 		if err != nil {
 			return err
 		}
@@ -141,10 +157,15 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 			dir = "."
 		}
 		topK := cfg.Hooks.OpenCodeTopK
-		if err := hook.InstallOpenCode(dir, project, topK); err != nil {
+		installed, err := hook.InstallOpenCode(dir, project, topK)
+		if err != nil {
 			return fmt.Errorf("installing OpenCode hook: %w", err)
 		}
-		fmt.Printf("nav OpenCode hook installed in %s/.opencode/plugins/nav-hook.js\n", dir)
+		if installed {
+			fmt.Printf("nav OpenCode hook installed in %s/.opencode/plugins/nav-hook.js\n", dir)
+		} else {
+			fmt.Printf("nav OpenCode hook already installed in %s/.opencode/plugins/nav-hook.js, skipping\n", dir)
+		}
 
 	default:
 		return fmt.Errorf("unknown hook type %q; must be \"git\", \"claude\", \"qwen\", \"cursor\", or \"opencode\"", hookInstallType)
@@ -186,7 +207,7 @@ func runHookUninstall(cmd *cobra.Command, args []string) error {
 		if err := hook.Uninstall(path); err != nil {
 			return fmt.Errorf("uninstalling git hook: %w", err)
 		}
-		fmt.Printf("nav git hooks removed from %s/.git/hooks/ (pre-commit + post-merge)\n", path)
+		fmt.Printf("nav git hooks removed from %s/.git/hooks/ (pre-commit + pre-push + post-merge + post-rewrite + reference-transaction)\n", path)
 
 	case "claude":
 		var settingsPath string
@@ -271,7 +292,7 @@ var hookRunCmd = &cobra.Command{
 }
 
 func init() {
-	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git", "git-post-merge", "claude", "qwen", "cursor", or "opencode" (required)`)
+	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git", "git-pre-push", "git-post-merge", "claude", "claude-session-start", "qwen", "cursor", or "opencode" (required)`)
 	hookRunCmd.Flags().StringVar(&hookRunPath, "path", ".", "Repository path (for git hooks)")
 	hookRunCmd.Flags().IntVar(&hookRunTop, "top", 5, "Number of results to inject (for claude, qwen, cursor, and opencode hooks)")
 	hookRunCmd.Flags().StringVar(&hookRunQuery, "query", "", "Query text (for claude, qwen, cursor, and opencode hooks)")
@@ -284,403 +305,154 @@ func runHookRun(cmd *cobra.Command, args []string) error {
 	case "git":
 		return runHookRunGit(hookRunPath)
 
+	case "git-pre-push":
+		return runHookRunPrePush(hookRunPath)
+
 	case "git-post-merge":
 		return runHookRunPostMerge(hookRunPath)
 
 	case "claude":
-		project, _, err := resolveProject(args, hookRunPath)
+		project, path, err := services.ResolveProject(args, hookRunPath)
 		if err != nil {
 			return err
 		}
-		return runHookRunClaude(project, hookRunQuery, hookRunTop)
+		return runHookRunClaude(project, path, hookRunQuery, hookRunTop)
+
+	case "claude-session-start":
+		project, path, err := services.ResolveProject(args, hookRunPath)
+		if err != nil {
+			return err
+		}
+		return runHookRunClaudeSessionStart(project, path)
 
 	case "qwen":
-		project, _, err := resolveProject(args, hookRunPath)
+		project, path, err := services.ResolveProject(args, hookRunPath)
 		if err != nil {
 			return err
 		}
-		return runHookRunQwen(project, hookRunQuery, hookRunTop) // Call dedicated Qwen function
+		return runHookRunQwen(project, path, hookRunQuery, hookRunTop)
 
 	case "cursor":
-		project, _, err := resolveProject(args, hookRunPath)
+		project, path, err := services.ResolveProject(args, hookRunPath)
 		if err != nil {
 			return err
 		}
-		return runHookRunCursor(project, hookRunQuery, hookRunTop) // Call dedicated Cursor function
+		return runHookRunCursor(project, path, hookRunQuery, hookRunTop)
 
 	case "opencode":
-		project, _, err := resolveProject(args, hookRunPath)
+		project, path, err := services.ResolveProject(args, hookRunPath)
 		if err != nil {
 			return err
 		}
-		return runHookRunOpenCode(project, hookRunQuery, hookRunTop) // Call dedicated OpenCode function
+		return runHookRunOpenCode(project, path, hookRunQuery, hookRunTop)
 
 	default:
-		return fmt.Errorf("unknown hook type %q; must be \"git\", \"git-post-merge\", \"claude\", \"qwen\", \"cursor\", or \"opencode\"", hookRunType)
+		return fmt.Errorf("unknown hook type %q; must be \"git\", \"git-pre-push\", \"git-post-merge\", \"claude\", \"claude-session-start\", \"qwen\", \"cursor\", or \"opencode\"", hookRunType)
 	}
 }
 
-// runHookRunGit handles the git pre-commit hook: re-indexes changed files and
-// removes deleted files from Qdrant.
-func runHookRunGit(repoPath string) error {
-	changed, deleted, err := hook.StagedFiles(repoPath)
+// runHookRunClaudeSessionStart handles Claude Code's SessionStart hook: it
+// prints the knowledge graph's cached digest (nav graph summary) plus the
+// full project structure (every package and the files it contains), so a
+// new session starts already knowing the codebase's layout — straight from
+// the graph nav sync built — instead of having to explore it with
+// find/ls/tree first. It does not sync first — the digest reflects whatever
+// the last sync left in the current branch's .nav/nav-<branch>.db, and
+// syncing here would add hook-startup latency for a summary that's meant to
+// be a cheap, already-cached read.
+func runHookRunClaudeSessionStart(project, path string) error {
+	digest, err := services.SessionStartDigest(path)
 	if err != nil {
-		return fmt.Errorf("reading staged files: %w", err)
+		return fmt.Errorf("building session start context: %w", err)
 	}
-
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return fmt.Errorf("loading credentials: %w", err)
-	}
-
-	// Derive a project name from the directory basename as a sensible default.
-	// The hook script can be customised to pass --project explicitly.
-	project := "default"
-
-	ctx := context.Background()
-
-	if len(changed) > 0 {
-		if err := indexSpecificFiles(ctx, project, repoPath, "", "", cfg.Indexing.Concurrency, false, changed, []string{}); err != nil {
-			fmt.Fprintf(os.Stderr, "nav: warn: re-indexing: %v\n", err)
-		}
-	}
-
-	if len(deleted) > 0 {
-		collection := "nav_" + project
-		if qErr := services.EnsureLocalQdrant(cfg); qErr != nil {
-			fmt.Fprintf(os.Stderr, "nav: warn: ensuring local qdrant: %v\n", qErr)
-		}
-		qdrantClient, qErr := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
-		if qErr != nil {
-			fmt.Fprintf(os.Stderr, "nav: warn: creating qdrant client: %v\n", qErr)
-		} else {
-			defer qdrantClient.Close()
-			branch := currentBranch(repoPath)
-			ids, qErr := deletedFileIDs(ctx, qdrantClient, collection, branch, deleted)
-			if qErr != nil {
-				fmt.Fprintf(os.Stderr, "nav: warn: querying deleted files: %v\n", qErr)
-			}
-			if len(ids) > 0 {
-				if dErr := qdrantClient.Delete(ctx, collection, ids); dErr != nil {
-					fmt.Fprintf(os.Stderr, "nav: warn: deleting symbols: %v\n", dErr)
-				}
-			}
-		}
-	}
-
-	fmt.Printf("nav: updated %d symbols\n", len(changed))
+	fmt.Println(digest)
 	return nil
 }
 
-// runHookRunPostMerge handles the git post-merge hook: re-indexes files that
-// changed during a merge (e.g. git pull) and removes deleted files from Qdrant.
-func runHookRunPostMerge(repoPath string) error {
-	changed, deleted, err := hook.MergedFiles(repoPath)
-	if err != nil {
-		return fmt.Errorf("reading merged files: %w", err)
-	}
+// runHookRunGit handles the git pre-commit hook, runHookRunPrePush the
+// pre-push hook, and runHookRunPostMerge the post-merge/post-rewrite/
+// reference-transaction hooks (every flavor of `git pull`, see git.go): all
+// three just trigger a lazy sync. Routing through services.GitHookSync —
+// rather than diffing staged/merged files and re-indexing them directly —
+// means every git hook run is validated against the same SQLite manifest the
+// prompt hooks use, so a file already synced (by a previous hook run, or by a
+// prompt hook in between) is never re-embedded for nothing. That's the
+// pre-push hook's whole job: it revalidates local state against the manifest
+// right before it leaves the machine, and content whose hash hasn't moved
+// since the last sync is skipped rather than re-embedded. On the pull side,
+// the same lazy sync re-diffs against the last synced HEAD, so every object
+// touched by the incoming commits gets re-parsed and, where its content hash
+// actually changed, re-embedded and written back to Qdrant and the local
+// SQLite state.
+func runHookRunGit(repoPath string) error {
+	return runGitHookSync(repoPath)
+}
 
-	if len(changed) == 0 && len(deleted) == 0 {
+func runHookRunPrePush(repoPath string) error {
+	return runGitHookSync(repoPath)
+}
+
+func runHookRunPostMerge(repoPath string) error {
+	return runGitHookSync(repoPath)
+}
+
+func runGitHookSync(repoPath string) error {
+	result, err := services.GitHookSync(repoPath)
+	if err != nil {
+		return fmt.Errorf("syncing: %w", err)
+	}
+	if result.Skipped {
+		fmt.Println("nav: sync skipped, another sync already running")
 		return nil
 	}
-
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return fmt.Errorf("loading credentials: %w", err)
-	}
-
-	project := "default"
-	ctx := context.Background()
-
-	if len(changed) > 0 {
-		if err := indexSpecificFiles(ctx, project, repoPath, "", "", cfg.Indexing.Concurrency, false, changed, []string{}); err != nil {
-			fmt.Fprintf(os.Stderr, "nav: warn: re-indexing merged files: %v\n", err)
-		}
-	}
-
-	if len(deleted) > 0 {
-		collection := "nav_" + project
-		if qErr := services.EnsureLocalQdrant(cfg); qErr != nil {
-			fmt.Fprintf(os.Stderr, "nav: warn: ensuring local qdrant: %v\n", qErr)
-		}
-		qdrantClient, qErr := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
-		if qErr != nil {
-			fmt.Fprintf(os.Stderr, "nav: warn: creating qdrant client: %v\n", qErr)
-		} else {
-			defer qdrantClient.Close()
-			branch := currentBranch(repoPath)
-			ids, qErr := deletedFileIDs(ctx, qdrantClient, collection, branch, deleted)
-			if qErr != nil {
-				fmt.Fprintf(os.Stderr, "nav: warn: querying deleted files: %v\n", qErr)
-			}
-			if len(ids) > 0 {
-				if dErr := qdrantClient.Delete(ctx, collection, ids); dErr != nil {
-					fmt.Fprintf(os.Stderr, "nav: warn: deleting symbols: %v\n", dErr)
-				}
-			}
-		}
-	}
-
-	fmt.Printf("nav: updated %d symbols from merge\n", len(changed))
+	fmt.Printf("nav: %s\n", result.Summary())
 	return nil
 }
 
-// runHookRunClaude handles the Claude Code prompt hook: embeds the query,
-// searches Qdrant, formats a context block, and prints it.
-func runHookRunClaude(project, query string, topK int) error {
+// runHookRunAssistant is the shared core of every AI-assistant prompt hook:
+// it searches the project (syncing first) via services.HookSearch and prints
+// the formatted <nav-context> block. An empty query is a no-op, matching the
+// prompt hooks' "nothing to inject" case.
+func runHookRunAssistant(project, path, query string, topK int, minScore float64, maxTokens int) error {
 	if query == "" {
-		return nil // nothing to do
+		return nil
 	}
-
-	cfg, err := config.Load()
+	results, err := services.HookSearch(context.Background(), project, path, query, topK, minScore)
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return err
 	}
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return fmt.Errorf("loading credentials: %w", err)
-	}
-
-	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
-		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
-
-	ctx := context.Background()
-
-	vecs, err := llmClient.EmbedQuery(ctx, cfg.Embedding.Model, cfg.Embedding.QueryInstruction, []string{query})
-	if err != nil {
-		return fmt.Errorf("embedding query: %w", err)
-	}
-	if len(vecs) == 0 {
-		return fmt.Errorf("embedder returned no vectors")
-	}
-
-	collection := "nav_" + project
-	if err := services.EnsureLocalQdrant(cfg); err != nil {
-		return fmt.Errorf("ensuring local qdrant: %w", err)
-	}
-	qdrantClient, err := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
-	if err != nil {
-		return fmt.Errorf("creating qdrant client: %w", err)
-	}
-	defer qdrantClient.Close()
-
-	results, err := qdrantClient.Search(ctx, collection, vecs[0], overFetch(topK), cfg.Hooks.ClaudeMinScore, nil)
-	if err != nil {
-		return fmt.Errorf("searching: %w", err)
-	}
-	results = topN(collapseChunks(results), topK)
-
-	// Convert to hook.ContextResult.
-	ctxResults := make([]hook.ContextResult, 0, len(results))
-	for _, r := range results {
-		ctxResults = append(ctxResults, hook.ContextResult{
-			Score:   r.Score,
-			Symbol:  r.Payload.Symbol,
-			Type:    r.Payload.Type,
-			File:    r.Payload.FilePath,
-			Purpose: r.Payload.Summary,
-			Code:    r.Payload.Content,
-		})
-	}
-
-	block := hook.FormatContextBlock(project, query, ctxResults, cfg.Hooks.ClaudeMaxTokens)
-	fmt.Println(block)
+	fmt.Println(hook.FormatContextBlock(project, query, results, maxTokens))
 	return nil
 }
 
-// runHookRunQwen handles the Qwen Code prompt hook: embeds the query,
-// searches Qdrant, formats a context block, and prints it.
-func runHookRunQwen(project, query string, topK int) error {
-	if query == "" {
-		return nil // nothing to do
-	}
-
+func runHookRunClaude(project, path, query string, topK int) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return fmt.Errorf("loading credentials: %w", err)
-	}
-
-	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
-		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
-
-	ctx := context.Background()
-
-	vecs, err := llmClient.EmbedQuery(ctx, cfg.Embedding.Model, cfg.Embedding.QueryInstruction, []string{query})
-	if err != nil {
-		return fmt.Errorf("embedding query: %w", err)
-	}
-	if len(vecs) == 0 {
-		return fmt.Errorf("embedder returned no vectors")
-	}
-
-	collection := "nav_" + project
-	if err := services.EnsureLocalQdrant(cfg); err != nil {
-		return fmt.Errorf("ensuring local qdrant: %w", err)
-	}
-	qdrantClient, err := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
-	if err != nil {
-		return fmt.Errorf("creating qdrant client: %w", err)
-	}
-	defer qdrantClient.Close()
-
-	results, err := qdrantClient.Search(ctx, collection, vecs[0], overFetch(topK), cfg.Hooks.QwenMinScore, nil)
-	if err != nil {
-		return fmt.Errorf("searching: %w", err)
-	}
-	results = topN(collapseChunks(results), topK)
-
-	// Convert to hook.ContextResult.
-	ctxResults := make([]hook.ContextResult, 0, len(results))
-	for _, r := range results {
-		ctxResults = append(ctxResults, hook.ContextResult{
-			Score:   r.Score,
-			Symbol:  r.Payload.Symbol,
-			Type:    r.Payload.Type,
-			File:    r.Payload.FilePath,
-			Purpose: r.Payload.Summary,
-			Code:    r.Payload.Content,
-		})
-	}
-
-	block := hook.FormatContextBlock(project, query, ctxResults, cfg.Hooks.QwenMaxTokens)
-	fmt.Println(block)
-	return nil
+	return runHookRunAssistant(project, path, query, topK, cfg.Hooks.ClaudeMinScore, cfg.Hooks.ClaudeMaxTokens)
 }
 
-// runHookRunCursor handles the Cursor prompt hook: embeds the query,
-// searches Qdrant, formats a context block, and prints it.
-func runHookRunCursor(project, query string, topK int) error {
-	if query == "" {
-		return nil // nothing to do
-	}
-
+func runHookRunQwen(project, path, query string, topK int) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return fmt.Errorf("loading credentials: %w", err)
-	}
-
-	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
-		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
-
-	ctx := context.Background()
-
-	vecs, err := llmClient.EmbedQuery(ctx, cfg.Embedding.Model, cfg.Embedding.QueryInstruction, []string{query})
-	if err != nil {
-		return fmt.Errorf("embedding query: %w", err)
-	}
-	if len(vecs) == 0 {
-		return fmt.Errorf("embedder returned no vectors")
-	}
-
-	collection := "nav_" + project
-	if err := services.EnsureLocalQdrant(cfg); err != nil {
-		return fmt.Errorf("ensuring local qdrant: %w", err)
-	}
-	qdrantClient, err := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
-	if err != nil {
-		return fmt.Errorf("creating qdrant client: %w", err)
-	}
-	defer qdrantClient.Close()
-
-	results, err := qdrantClient.Search(ctx, collection, vecs[0], overFetch(topK), cfg.Hooks.CursorMinScore, nil)
-	if err != nil {
-		return fmt.Errorf("searching: %w", err)
-	}
-	results = topN(collapseChunks(results), topK)
-
-	// Convert to hook.ContextResult.
-	ctxResults := make([]hook.ContextResult, 0, len(results))
-	for _, r := range results {
-		ctxResults = append(ctxResults, hook.ContextResult{
-			Score:   r.Score,
-			Symbol:  r.Payload.Symbol,
-			Type:    r.Payload.Type,
-			File:    r.Payload.FilePath,
-			Purpose: r.Payload.Summary,
-			Code:    r.Payload.Content,
-		})
-	}
-
-	block := hook.FormatContextBlock(project, query, ctxResults, cfg.Hooks.CursorMaxTokens)
-	fmt.Println(block)
-	return nil
+	return runHookRunAssistant(project, path, query, topK, cfg.Hooks.QwenMinScore, cfg.Hooks.QwenMaxTokens)
 }
 
-// runHookRunOpenCode handles the OpenCode prompt hook: embeds the query,
-// searches Qdrant, formats a context block, and prints it.
-func runHookRunOpenCode(project, query string, topK int) error {
-	if query == "" {
-		return nil // nothing to do
-	}
-
+func runHookRunCursor(project, path, query string, topK int) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	creds, err := config.LoadCredentials()
+	return runHookRunAssistant(project, path, query, topK, cfg.Hooks.CursorMinScore, cfg.Hooks.CursorMaxTokens)
+}
+
+func runHookRunOpenCode(project, path, query string, topK int) error {
+	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("loading credentials: %w", err)
+		return fmt.Errorf("loading config: %w", err)
 	}
-
-	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
-		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
-
-	ctx := context.Background()
-
-	vecs, err := llmClient.EmbedQuery(ctx, cfg.Embedding.Model, cfg.Embedding.QueryInstruction, []string{query})
-	if err != nil {
-		return fmt.Errorf("embedding query: %w", err)
-	}
-	if len(vecs) == 0 {
-		return fmt.Errorf("embedder returned no vectors")
-	}
-
-	collection := "nav_" + project
-	if err := services.EnsureLocalQdrant(cfg); err != nil {
-		return fmt.Errorf("ensuring local qdrant: %w", err)
-	}
-	qdrantClient, err := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
-	if err != nil {
-		return fmt.Errorf("creating qdrant client: %w", err)
-	}
-	defer qdrantClient.Close()
-
-	results, err := qdrantClient.Search(ctx, collection, vecs[0], overFetch(topK), cfg.Hooks.OpenCodeMinScore, nil)
-	if err != nil {
-		return fmt.Errorf("searching: %w", err)
-	}
-	results = topN(collapseChunks(results), topK)
-
-	// Convert to hook.ContextResult.
-	ctxResults := make([]hook.ContextResult, 0, len(results))
-	for _, r := range results {
-		ctxResults = append(ctxResults, hook.ContextResult{
-			Score:   r.Score,
-			Symbol:  r.Payload.Symbol,
-			Type:    r.Payload.Type,
-			File:    r.Payload.FilePath,
-			Purpose: r.Payload.Summary,
-			Code:    r.Payload.Content,
-		})
-	}
-
-	block := hook.FormatContextBlock(project, query, ctxResults, cfg.Hooks.OpenCodeMaxTokens)
-	fmt.Println(block)
-	return nil
+	return runHookRunAssistant(project, path, query, topK, cfg.Hooks.OpenCodeMinScore, cfg.Hooks.OpenCodeMaxTokens)
 }

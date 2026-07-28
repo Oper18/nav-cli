@@ -18,15 +18,17 @@ type CursorHookEntry struct {
 
 // InstallCursor writes the nav hook into Cursor settings.
 // settingsPath is the full path to the settings.json file.
-// project is the nav project name. topK is how many results to inject.
-func InstallCursor(settingsPath, project string, topK int) error {
+// project is the nav project name. topK is how many results to inject. It
+// returns installed=false when the hook was already present, leaving
+// settings.json untouched in that case.
+func InstallCursor(settingsPath, project string, topK int) (installed bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
-		return fmt.Errorf("creating settings directory: %w", err)
+		return false, fmt.Errorf("creating settings directory: %w", err)
 	}
 
 	settings, err := readSettingsJSON(settingsPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Navigate to tools, creating as needed.
@@ -48,7 +50,7 @@ func InstallCursor(settingsPath, project string, topK int) error {
 			continue
 		}
 		if command, exists := toolMap["command"]; exists && strings.Contains(command.(string), navCommand) {
-			return nil // already installed
+			return false, nil // already installed
 		}
 	}
 
@@ -65,7 +67,10 @@ func InstallCursor(settingsPath, project string, topK int) error {
 
 	settings["tools"] = append(tools, newEntry)
 
-	return writeSettingsJSON(settingsPath, settings)
+	if err := writeSettingsJSON(settingsPath, settings); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // UninstallCursor removes the nav hook from Cursor settings.

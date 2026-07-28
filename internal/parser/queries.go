@@ -25,6 +25,10 @@ var languageQueries = map[string]string{
   (type_spec
     name: (type_identifier) @name
     type: (interface_type))) @interface_definition
+
+(const_declaration
+  (const_spec
+    name: (identifier) @name)) @const_definition
 `,
 
 	LangPython: `

@@ -21,15 +21,17 @@ type QwenHook struct {
 
 // InstallQwen writes the nav hook into Qwen Code settings.json.
 // settingsPath is the full path to the settings.json file.
-// project is the nav project name. topK is how many results to inject.
-func InstallQwen(settingsPath, project string, topK int) error {
+// project is the nav project name. topK is how many results to inject. It
+// returns installed=false when the hook was already present, leaving
+// settings.json untouched in that case.
+func InstallQwen(settingsPath, project string, topK int) (installed bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
-		return fmt.Errorf("creating settings directory: %w", err)
+		return false, fmt.Errorf("creating settings directory: %w", err)
 	}
 
 	settings, err := readSettingsJSON(settingsPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Navigate to hooks.UserPromptSubmit, creating as needed.
@@ -52,7 +54,7 @@ func InstallQwen(settingsPath, project string, topK int) error {
 			continue
 		}
 		if entryContainsNavQwen(entry) {
-			return nil // already installed
+			return false, nil // already installed
 		}
 	}
 
@@ -69,7 +71,10 @@ func InstallQwen(settingsPath, project string, topK int) error {
 
 	hooks["UserPromptSubmit"] = append(existing, newEntry)
 
-	return writeSettingsJSON(settingsPath, settings)
+	if err := writeSettingsJSON(settingsPath, settings); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // UninstallQwen removes the nav hook from Qwen Code settings.json.

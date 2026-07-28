@@ -7,13 +7,15 @@ import (
 	"strings"
 )
 
-// InstallOpenCode creates an OpenCode plugin that provides a nav_context tool.
-func InstallOpenCode(dir, project string, topK int) error {
+// InstallOpenCode creates an OpenCode plugin that provides a nav_context
+// tool. It returns installed=false when the plugin was already present,
+// leaving it untouched in that case.
+func InstallOpenCode(dir, project string, topK int) (installed bool, err error) {
 	opencodeDir := filepath.Join(dir, ".opencode")
 	pluginDir := filepath.Join(opencodeDir, "plugins")
 
 	if err := os.MkdirAll(pluginDir, 0755); err != nil {
-		return fmt.Errorf("creating plugin directory: %w", err)
+		return false, fmt.Errorf("creating plugin directory: %w", err)
 	}
 
 	// Create package.json if it doesn't exist to ensure @opencode-ai/plugin is available
@@ -21,7 +23,7 @@ func InstallOpenCode(dir, project string, topK int) error {
 	if _, err := os.Stat(pkgPath); os.IsNotExist(err) {
 		pkgContent := `{"dependencies": {"@opencode-ai/plugin": "latest"}}`
 		if err := os.WriteFile(pkgPath, []byte(pkgContent), 0644); err != nil {
-			return fmt.Errorf("creating package.json: %w", err)
+			return false, fmt.Errorf("creating package.json: %w", err)
 		}
 	}
 
@@ -30,7 +32,7 @@ func InstallOpenCode(dir, project string, topK int) error {
 	// Check if already installed by reading the file
 	if data, err := os.ReadFile(pluginPath); err == nil {
 		if strings.Contains(string(data), "nav hook run") && strings.Contains(string(data), "--type opencode") {
-			return nil // already installed
+			return false, nil // already installed
 		}
 	}
 
@@ -60,7 +62,10 @@ export const NavHookPlugin = async ({ directory, $ }) => {
 };
 `, project, topK)
 
-	return os.WriteFile(pluginPath, []byte(pluginContent), 0644)
+	if err := os.WriteFile(pluginPath, []byte(pluginContent), 0644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // UninstallOpenCode removes the nav plugin from OpenCode.

@@ -123,7 +123,7 @@ func embedHeader(p Payload) string {
 // unsplit form of BuildEmbedChunks and is retained for callers and tests that
 // do not care about the token limit.
 func BuildEmbedText(p Payload) string {
-	return embedHeader(p) + normalizeContent(p.Content)
+	return embedHeader(p) + NormalizeContent(p.Content)
 }
 
 // BuildEmbedChunks renders the embedding input(s) for a payload. When the full
@@ -134,7 +134,7 @@ func BuildEmbedText(p Payload) string {
 // of code it covers; ordering chunks by their index reassembles the symbol.
 func BuildEmbedChunks(p Payload, maxRunes int) []EmbedChunk {
 	header := embedHeader(p)
-	code := normalizeContent(p.Content)
+	code := NormalizeContent(p.Content)
 
 	if maxRunes <= 0 || len([]rune(header))+len([]rune(code)) <= maxRunes {
 		return []EmbedChunk{{Text: header + code, Content: code}}
@@ -189,6 +189,22 @@ func (c *Client) EnsureCollection(ctx context.Context, name string, dimension in
 		}),
 	}); err != nil {
 		return fmt.Errorf("creating collection %q: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteCollection drops the named collection and every point it holds. It is
+// a no-op when the collection does not exist.
+func (c *Client) DeleteCollection(ctx context.Context, name string) error {
+	exists, err := c.sdk.CollectionExists(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if err := c.sdk.DeleteCollection(ctx, name); err != nil {
+		return fmt.Errorf("deleting collection %q: %w", name, err)
 	}
 	return nil
 }
@@ -311,9 +327,9 @@ func toPointID(id string) *sdk.PointId {
 	return sdk.NewID(uuid)
 }
 
-// normalizeContent collapses runs of blank lines, trims trailing whitespace on
+// NormalizeContent collapses runs of blank lines, trims trailing whitespace on
 // each line, and strips outer whitespace.
-func normalizeContent(s string) string {
+func NormalizeContent(s string) string {
 	lines := strings.Split(s, "\n")
 	out := make([]string, 0, len(lines))
 	prevBlank := false
