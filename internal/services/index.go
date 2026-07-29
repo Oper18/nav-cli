@@ -559,7 +559,7 @@ const readmeContextCap = 8000
 
 // readmeSourceBudget bounds the amount of project source fed to the README
 // generator in a single request, keeping it under the model's context window.
-const readmeSourceBudget = 120000
+const readmeSourceBudget = 200000
 
 // buildAndWriteReadme generates a business-logic-focused README from the
 // project's source code (not from per-symbol summaries, which do not exist yet)
