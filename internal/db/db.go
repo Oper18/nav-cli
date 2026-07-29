@@ -63,6 +63,6 @@ func (c *Client) DeleteByFilter(ctx context.Context, collection string, filters 
 }
 
 // Search performs a vector similarity search.
-func (c *Client) Search(ctx context.Context, collection string, vector []float32, limit int, minScore float64, filters map[string]string) ([]qdrant.Hit, error) {
-	return c.Qdrant.Search(ctx, collection, vector, limit, minScore, filters)
+func (c *Client) Search(ctx context.Context, collection string, vector []float32, limit int, minScore float64, filters map[string]string, branchIn []string) ([]qdrant.Hit, error) {
+	return c.Qdrant.Search(ctx, collection, vector, limit, minScore, filters, branchIn)
 }

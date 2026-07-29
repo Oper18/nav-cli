@@ -117,29 +117,68 @@ func BuildFileNodes(relPath string, symbols []Symbol) ([]GraphNode, []GraphEdge)
 		{ID: pkgID, Kind: nodeKindPackage, Name: dir},
 		{ID: fileID, Kind: nodeKindFile, Name: filepath.Base(relPath), File: relPath},
 	}
+	nodes = append(nodes, DirtySymbolNodes(relPath, symbols)...)
+
 	edges := []GraphEdge{
 		{Src: pkgID, Dst: fileID, Kind: edgeDefines},
 	}
+	edges = append(edges, DirtySymbolEdges(relPath, symbols, symbols)...)
 
-	for _, sym := range symbols {
-		id := SymbolNodeID(relPath, sym.Symbol)
+	return nodes, edges
+}
+
+// DirtySymbolNodes returns the graph nodes for just the given subset of a
+// file's symbols. It's the incremental counterpart to BuildFileNodes: a
+// caller that already knows which symbols actually changed (dirty, by
+// content hash) can rebuild only their nodes, leaving every unchanged
+// symbol's node untouched.
+func DirtySymbolNodes(relPath string, dirty []Symbol) []GraphNode {
+	nodes := make([]GraphNode, 0, len(dirty))
+	for _, sym := range dirty {
 		nodes = append(nodes, GraphNode{
-			ID:      id,
+			ID:      SymbolNodeID(relPath, sym.Symbol),
 			Kind:    NodeKind(sym.Type),
 			Name:    sym.Symbol,
 			File:    relPath,
 			Line:    int(sym.StartLine),
 			Summary: clipSummary(sym.Summary),
 		})
+	}
+	return nodes
+}
+
+// DirtySymbolEdges returns the structural edges (file "defines", plus the
+// Go-only embeds/implements heuristics) sourced from dirty symbols only.
+// allSymbols is the file's full current parse — still needed because
+// whether a dirty struct embeds another type, or a dirty interface is
+// satisfied by some type in the file, depends on sibling symbols that may
+// not themselves be dirty — but only edges whose source is one of dirty are
+// returned, so a caller can insert these without disturbing edges belonging
+// to unchanged symbols.
+func DirtySymbolEdges(relPath string, allSymbols, dirty []Symbol) []GraphEdge {
+	fileID := FileNodeID(relPath)
+	dirtyIDs := make(map[string]bool, len(dirty))
+	edges := make([]GraphEdge, 0, len(dirty))
+	for _, sym := range dirty {
+		id := SymbolNodeID(relPath, sym.Symbol)
+		dirtyIDs[id] = true
 		edges = append(edges, GraphEdge{Src: fileID, Dst: id, Kind: edgeDefines})
 	}
 
-	if lang := ProgrammingLanguage(relPath); lang == "go" {
-		edges = append(edges, goEmbedsEdges(relPath, symbols)...)
-		edges = append(edges, goImplementsEdges(relPath, symbols)...)
+	if ProgrammingLanguage(relPath) == "go" {
+		for _, e := range goEmbedsEdges(relPath, allSymbols) {
+			if dirtyIDs[e.Src] {
+				edges = append(edges, e)
+			}
+		}
+		for _, e := range goImplementsEdges(relPath, allSymbols) {
+			if dirtyIDs[e.Src] {
+				edges = append(edges, e)
+			}
+		}
 	}
 
-	return nodes, edges
+	return edges
 }
 
 // goStructFieldLine matches a struct body line that is a single bare (or

@@ -273,8 +273,11 @@ func (c *Client) DeleteByFilter(ctx context.Context, collection string, filters 
 
 // Search performs a vector similarity search and returns up to limit Hits whose
 // score is at least minScore. The optional filters map applies exact-match
-// conditions on payload fields.
-func (c *Client) Search(ctx context.Context, collection string, vector []float32, limit int, minScore float64, filters map[string]string) ([]Hit, error) {
+// conditions on payload fields. branchIn, when non-empty, additionally
+// restricts results to points whose "branch" field matches any of the given
+// values — used to search a branch's own points together with its chain of
+// ancestor branches in one query.
+func (c *Client) Search(ctx context.Context, collection string, vector []float32, limit int, minScore float64, filters map[string]string, branchIn []string) ([]Hit, error) {
 	req := &sdk.QueryPoints{
 		CollectionName: collection,
 		Query:          sdk.NewQueryDense(vector),
@@ -284,11 +287,14 @@ func (c *Client) Search(ctx context.Context, collection string, vector []float32
 	if minScore > 0 {
 		req.ScoreThreshold = ptr(float32(minScore))
 	}
-	if len(filters) > 0 {
-		must := make([]*sdk.Condition, 0, len(filters))
-		for field, value := range filters {
-			must = append(must, sdk.NewMatchKeyword(field, value))
-		}
+	var must []*sdk.Condition
+	for field, value := range filters {
+		must = append(must, sdk.NewMatchKeyword(field, value))
+	}
+	if len(branchIn) > 0 {
+		must = append(must, sdk.NewMatchKeywords("branch", branchIn...))
+	}
+	if len(must) > 0 {
 		req.Filter = &sdk.Filter{Must: must}
 	}
 

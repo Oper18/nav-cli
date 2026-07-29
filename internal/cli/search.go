@@ -28,14 +28,16 @@ var searchCmd = &cobra.Command{
 		"Both the project name and --path are optional. When the project name is\n" +
 		"omitted it defaults to the basename of the current directory; when --path is\n" +
 		"omitted the path defaults to the project's registered path, or the current\n" +
-		"directory. When --branch is not given, the current branch of that repository\n" +
-		"is used as a filter.",
+		"directory. When --branch is not given, results are pulled from the current\n" +
+		"branch of that repository plus its chain of ancestor branches (whichever\n" +
+		"branches its embeddings were bootstrapped from), so symbols never re-embedded\n" +
+		"on this branch are still found.",
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runSearch,
 }
 
 func init() {
-	searchCmd.Flags().StringVar(&searchBranch, "branch", "", "Filter by git branch (default: current branch)")
+	searchCmd.Flags().StringVar(&searchBranch, "branch", "", "Filter by an exact git branch (default: current branch + its ancestor chain)")
 	searchCmd.Flags().StringVar(&searchPath, "path", "", "Path to the repository root (default: project path or current directory)")
 	searchCmd.Flags().IntVar(&searchTop, "top", 5, "Number of results to return")
 	searchCmd.Flags().StringVar(&searchType, "type", "", "Filter by symbol type (function, method, class, ...)")
@@ -53,21 +55,26 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Default the branch filter to the current branch of the project's repository.
-	branch := searchBranch
-	if branch == "" {
-		branch = services.CurrentBranch(repoPath)
-	}
-
-	results, err := services.Search(cmd.Context(), project, services.SearchOptions{
+	opts := services.SearchOptions{
 		Query:      query,
-		Branch:     branch,
 		Type:       searchType,
 		Lang:       searchLang,
 		Threshold:  searchThreshold,
 		Collection: searchCollection,
 		Top:        searchTop,
-	})
+	}
+	if searchBranch != "" {
+		// An explicit --branch means exactly that branch, not its ancestor chain.
+		opts.Branch = searchBranch
+	} else {
+		chain, err := services.BranchChain(repoPath, services.CurrentBranch(repoPath))
+		if err != nil {
+			return fmt.Errorf("resolving branch chain: %w", err)
+		}
+		opts.BranchChain = chain
+	}
+
+	results, err := services.Search(cmd.Context(), project, opts)
 	if err != nil {
 		return err
 	}

@@ -1,9 +1,12 @@
 package services
 
 import (
+	"context"
+	"database/sql"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"nav/internal/db"
@@ -135,7 +138,7 @@ func TestAlreadySyncedFileIsNotFlaggedAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, deleted, err := detectChangedFiles(sdb, repo)
+	changed, deleted, _, err := detectChangedFiles(sdb, repo, "main")
 	if err != nil {
 		t.Fatalf("detectChangedFiles: %v", err)
 	}
@@ -227,7 +230,7 @@ func TestGitStatusAndChangeDetection(t *testing.T) {
 	// Bootstrap case: no last_sync_head recorded yet, so every tracked file
 	// counts as "changed since last sync" — otherwise a brand new project
 	// with a clean working tree would never get indexed at all.
-	changed, deleted, err := detectChangedFiles(sdb, repo)
+	changed, deleted, _, err := detectChangedFiles(sdb, repo, "main")
 	if err != nil {
 		t.Fatalf("detectChangedFiles: %v", err)
 	}
@@ -256,7 +259,7 @@ func TestGitStatusAndChangeDetection(t *testing.T) {
 	run("add", "b.go")
 	run("commit", "-q", "-m", "add b")
 
-	changed, deleted, err = detectChangedFiles(sdb, repo)
+	changed, deleted, _, err = detectChangedFiles(sdb, repo, "main")
 	if err != nil {
 		t.Fatalf("detectChangedFiles after commit: %v", err)
 	}
@@ -280,7 +283,7 @@ func TestGitStatusAndChangeDetection(t *testing.T) {
 	if err := sdb.SetMeta(metaLastSyncHead, HeadCommit(repo)); err != nil {
 		t.Fatal(err)
 	}
-	changed, _, err = detectChangedFiles(sdb, repo)
+	changed, _, _, err = detectChangedFiles(sdb, repo, "main")
 	if err != nil {
 		t.Fatalf("detectChangedFiles after working-tree edit: %v", err)
 	}
@@ -292,5 +295,228 @@ func TestGitStatusAndChangeDetection(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a.go among changed files after working-tree edit, got %v", changed)
+	}
+}
+
+// setupBranchTopology builds the fork-point ambiguity from a real repo's
+// `git log --graph --oneline --decorate --all --simplify-by-decoration`:
+// "dev" branches off "main" and gets a commit of its own, "main" then merges
+// "dev" back in via a merge commit (so main and dev share the very same
+// merge-base with anything forked off dev), and "feature" branches off
+// dev's tip with one commit of its own. nav is told it already indexed both
+// "main" and "dev" (db.Exists), but not "feature" — mirroring a freshly
+// checked-out branch nav has never synced.
+func setupBranchTopology(t *testing.T) (repo string, run func(args ...string) string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo = t.TempDir()
+	run = func(args ...string) string {
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	writeFile := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run("init", "-q", "-b", "main")
+	run("config", "user.email", "t@example.com")
+	run("config", "user.name", "t")
+
+	writeFile("a.txt", "c0\n")
+	run("add", "a.txt")
+	run("commit", "-q", "-m", "c0")
+
+	run("checkout", "-q", "-b", "dev")
+	writeFile("b.txt", "c1\n")
+	run("add", "b.txt")
+	run("commit", "-q", "-m", "c1")
+
+	run("checkout", "-q", "main")
+	run("merge", "--no-ff", "-q", "-m", "Merged in dev", "dev")
+
+	run("checkout", "-q", "dev")
+	run("checkout", "-q", "-b", "feature")
+	writeFile("c.txt", "c3\n")
+	run("add", "c.txt")
+	run("commit", "-q", "-m", "c3")
+
+	for _, b := range []string{"main", "dev"} {
+		sdb, err := db.Open(repo, b)
+		if err != nil {
+			t.Fatalf("db.Open(%s): %v", b, err)
+		}
+		sdb.Close()
+	}
+
+	return repo, run
+}
+
+// TestDetectParentBranchPrefersClosestSharedHistory guards the tie-break: when
+// two candidate branches share the exact same merge-base commit (because one
+// of them later merged the other), the candidate whose own tip *is* that
+// commit — the more direct ancestor — must win over the one that has since
+// diverged further via its own merge.
+func TestDetectParentBranchPrefersClosestSharedHistory(t *testing.T) {
+	repo, run := setupBranchTopology(t)
+
+	parent, base, found := detectParentBranch(repo, "feature")
+	if !found {
+		t.Fatal("expected a parent branch to be found")
+	}
+	if parent != "dev" {
+		t.Errorf("parent = %q, want %q (main shares the same merge-base only via its later merge commit)", parent, "dev")
+	}
+	if want := run("rev-parse", "dev"); base != want {
+		t.Errorf("mergeBase = %q, want dev's tip %q", base, want)
+	}
+}
+
+// TestBootstrapDiffsOnlyAgainstParentBranch guards the actual payoff: a
+// brand-new branch's first-ever sync must only flag the files that differ
+// from its detected parent, not every tracked file in the repo — otherwise
+// checking out a new branch would re-embed the whole project from scratch.
+func TestBootstrapDiffsOnlyAgainstParentBranch(t *testing.T) {
+	repo, _ := setupBranchTopology(t)
+
+	sdb, err := db.Open(repo, "feature")
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sdb.Close()
+
+	changed, deleted, parentBranch, err := detectChangedFiles(sdb, repo, "feature")
+	if err != nil {
+		t.Fatalf("detectChangedFiles: %v", err)
+	}
+	if parentBranch != "dev" {
+		t.Fatalf("parentBranch = %q, want %q", parentBranch, "dev")
+	}
+	if len(deleted) != 0 {
+		t.Errorf("expected no deletions, got %v", deleted)
+	}
+	if len(changed) != 1 || changed[0] != "c.txt" {
+		t.Errorf("changed = %v, want only [c.txt] — a.txt/b.txt are unchanged from parent branch dev and must not be re-embedded", changed)
+	}
+}
+
+// TestSyncFilesPersistsParentBranchMeta guards that syncFiles writes the
+// detected parent branch into the manifest even when the bootstrap diff
+// found nothing to embed (a brand new branch with no commits yet beyond its
+// fork point) — otherwise the parent link, and the fast no-op path, would
+// never be recorded and every future sync would redo bootstrap detection.
+func TestSyncFilesPersistsParentBranchMeta(t *testing.T) {
+	repo, _ := setupBranchTopology(t)
+
+	sdb, err := db.Open(repo, "feature")
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sdb.Close()
+
+	if _, err := syncFiles(context.Background(), sdb, "testproj", repo, "feature", nil, nil, "dev", false); err != nil {
+		t.Fatalf("syncFiles: %v", err)
+	}
+
+	got, ok, err := sdb.GetMeta(metaParentBranch)
+	if err != nil {
+		t.Fatalf("GetMeta: %v", err)
+	}
+	if !ok || got != "dev" {
+		t.Errorf("parent_branch meta = %q, ok=%v; want %q, true", got, ok, "dev")
+	}
+}
+
+// TestUpdateFileGraphOnlyTouchesDirtySymbols guards the actual point of the
+// symbol-scoped graph rewrite: syncing a file where only one of several
+// symbols actually changed must leave every other symbol's node and edges
+// completely alone — not tear them down and recreate them identically. It
+// plants a marker edge on the untouched symbol's node that only
+// DeleteOutgoingEdges (the full-rebuild path's teardown call) would remove,
+// and asserts it survives.
+func TestUpdateFileGraphOnlyTouchesDirtySymbols(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "a.go"), []byte("package a\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sdb, err := db.Open(repo, "main")
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sdb.Close()
+
+	fooID := parser.SymbolNodeID("a.go", "Foo")
+	barID := parser.SymbolNodeID("a.go", "Bar")
+	markerID := "sym:marker"
+
+	if err := sdb.WithTx(func(tx *sql.Tx) error {
+		if err := db.UpsertNode(tx, db.Node{ID: fooID, Kind: db.KindFunc, Name: "Foo", File: "a.go", Line: 1, Summary: "old foo"}); err != nil {
+			return err
+		}
+		if err := db.UpsertNode(tx, db.Node{ID: barID, Kind: db.KindFunc, Name: "Bar", File: "a.go", Line: 5, Summary: "bar summary"}); err != nil {
+			return err
+		}
+		if err := db.UpsertNode(tx, db.Node{ID: markerID, Kind: db.KindFunc, Name: "Marker"}); err != nil {
+			return err
+		}
+		// A synthetic outgoing edge on Bar's node: only a call to
+		// DeleteOutgoingEdges(barID) — i.e. treating Bar as dirty or torn
+		// down — would remove this.
+		return db.InsertEdge(tx, db.Edge{Src: barID, Dst: markerID, Kind: db.EdgeCalls})
+	}); err != nil {
+		t.Fatalf("seeding graph: %v", err)
+	}
+
+	allSymbols := []parser.Symbol{
+		mkSymbol("Foo", "func Foo() {\n\treturn 2\n}"), // dirty: content changed
+		mkSymbol("Bar", "func Bar() {\n\treturn\n}"),   // unchanged
+	}
+	dirty := []parser.Symbol{allSymbols[0]}
+
+	if err := sdb.WithTx(func(tx *sql.Tx) error {
+		return updateFileGraph(tx, repo, "a.go", allSymbols, dirty, nil)
+	}); err != nil {
+		t.Fatalf("updateFileGraph: %v", err)
+	}
+
+	bar, ok, err := db.NodeByID(sdb, barID)
+	if err != nil {
+		t.Fatalf("NodeByID(Bar): %v", err)
+	}
+	if !ok {
+		t.Fatal("Bar's node should still exist")
+	}
+	if bar.Summary != "bar summary" {
+		t.Errorf("Bar's summary = %q, want unchanged %q — it was not dirty and should not have been touched", bar.Summary, "bar summary")
+	}
+
+	edges, err := db.EdgesFrom(sdb, barID)
+	if err != nil {
+		t.Fatalf("EdgesFrom(Bar): %v", err)
+	}
+	foundMarker := false
+	for _, e := range edges {
+		if e.Dst == markerID {
+			foundMarker = true
+		}
+	}
+	if !foundMarker {
+		t.Error("Bar's marker edge was removed — an unchanged symbol's edges must not be touched")
+	}
+
+	foo, ok, err := db.NodeByID(sdb, fooID)
+	if err != nil {
+		t.Fatalf("NodeByID(Foo): %v", err)
+	}
+	if !ok || foo.Summary == "old foo" {
+		t.Errorf("Foo's node should have been refreshed (it was dirty); summary = %q", foo.Summary)
 	}
 }

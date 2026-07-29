@@ -2,6 +2,7 @@ package services
 
 import (
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -106,4 +107,52 @@ func unquoteGitPath(p string) string {
 		return strings.Trim(p, `"`)
 	}
 	return p
+}
+
+// LocalBranches returns the short names of every local branch in repoPath.
+func LocalBranches(repoPath string) ([]string, error) {
+	out, err := RunGitCmd(repoPath, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+	if err != nil {
+		return nil, err
+	}
+	return SplitLines(out), nil
+}
+
+// MergeBase returns the merge-base commit of a and b, or ok=false when git
+// can't find one (e.g. unrelated histories).
+func MergeBase(repoPath, a, b string) (string, bool) {
+	out, err := RunGitCmd(repoPath, "merge-base", a, b)
+	if err != nil {
+		return "", false
+	}
+	base := strings.TrimSpace(out)
+	return base, base != ""
+}
+
+// CommitTimestamp returns ref's committer-date Unix timestamp, or ok=false
+// when ref can't be resolved.
+func CommitTimestamp(repoPath, ref string) (int64, bool) {
+	out, err := RunGitCmd(repoPath, "log", "-1", "--format=%ct", ref)
+	if err != nil {
+		return 0, false
+	}
+	ts, convErr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if convErr != nil {
+		return 0, false
+	}
+	return ts, true
+}
+
+// CommitsAhead returns how many commits ref has beyond base (i.e. the count
+// of base..ref), or ok=false when the range can't be resolved.
+func CommitsAhead(repoPath, base, ref string) (int, bool) {
+	out, err := RunGitCmd(repoPath, "rev-list", "--count", base+".."+ref)
+	if err != nil {
+		return 0, false
+	}
+	n, convErr := strconv.Atoi(strings.TrimSpace(out))
+	if convErr != nil {
+		return 0, false
+	}
+	return n, true
 }

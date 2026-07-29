@@ -84,6 +84,19 @@ func DeleteOutgoingEdges(exec Execer, src string) error {
 	return bumpGraphVersion(exec)
 }
 
+// DeleteOutgoingEdgesByKind removes every edge of the given kind whose src is
+// id, ahead of re-extracting that one edge kind from scratch. Used for a
+// file's "imports" edges, which are re-resolved on every sync regardless of
+// whether any single symbol in the file is dirty (there's no cheap "did
+// imports change" signal short of re-parsing them), without disturbing the
+// file's "defines" edges to symbols that weren't touched.
+func DeleteOutgoingEdgesByKind(exec Execer, src, kind string) error {
+	if _, err := exec.Exec(`DELETE FROM edges WHERE src = ? AND kind = ?`, src, kind); err != nil {
+		return fmt.Errorf("deleting outgoing %s edges for %q: %w", kind, src, err)
+	}
+	return bumpGraphVersion(exec)
+}
+
 // InsertEdge adds an edge, silently doing nothing if it already exists
 // (edges are pure facts, re-asserting one is a no-op).
 func InsertEdge(exec Execer, e Edge) error {

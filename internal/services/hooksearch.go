@@ -37,9 +37,12 @@ func GitHookSync(repoPath string) (LazySyncResult, error) {
 
 // HookSearch is the shared core of every AI-assistant prompt hook (Claude
 // Code, Qwen Code, Cursor, OpenCode): it syncs the index in-process, embeds
-// query, searches Qdrant under project's collection with no branch/type/lang
-// filtering, and returns the collapsed top-topK hits as ContextResult
-// entries ready for hook.FormatContextBlock. An empty query is a no-op.
+// query, searches Qdrant under project's collection — across the current
+// branch's chain of ancestor branches (BranchChain), so symbols this branch
+// never re-embedded itself are still found via whichever ancestor last held
+// them — with no type/lang filtering, and returns the collapsed top-topK
+// hits as ContextResult entries ready for hook.FormatContextBlock. An empty
+// query is a no-op.
 func HookSearch(ctx context.Context, project, path, query string, topK int, minScore float64) ([]hook.ContextResult, error) {
 	if query == "" {
 		return nil, nil
@@ -47,7 +50,12 @@ func HookSearch(ctx context.Context, project, path, query string, topK int, minS
 
 	SyncBeforeSearch(ctx, project, path)
 
-	hits, err := Search(ctx, project, SearchOptions{Query: query, Threshold: minScore, Top: topK})
+	chain, err := BranchChain(path, CurrentBranch(path))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "nav: warn: resolving branch chain: %v\n", err)
+	}
+
+	hits, err := Search(ctx, project, SearchOptions{Query: query, Threshold: minScore, Top: topK, BranchChain: chain})
 	if err != nil {
 		return nil, err
 	}

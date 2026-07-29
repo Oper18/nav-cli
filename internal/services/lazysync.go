@@ -48,7 +48,16 @@ const lazySyncLockWait = 4 * time.Second
 const (
 	metaLastSyncHead = "last_sync_head"
 	metaLastSyncAt   = "last_sync_at"
+	// metaParentBranch records which already-indexed branch a branch's
+	// embeddings were bootstrapped from (see detectParentBranch). It is
+	// written once, on that branch's first-ever sync, and never overwritten
+	// afterwards.
+	metaParentBranch = "parent_branch"
 )
+
+// maxParentChainDepth bounds how far BranchChain walks up recorded
+// parent_branch links, guarding against a pathological or cyclic chain.
+const maxParentChainDepth = 16
 
 // LazySync detects files changed since the last sync (via git status/HEAD
 // movement, or mtime for non-git projects), re-embeds only the chunks whose
@@ -70,15 +79,15 @@ func LazySync(ctx context.Context, project, repoPath string, dryRun bool) (LazyS
 		}
 		defer sdb.Close()
 
-		changed, deleted, err := detectChangedFiles(sdb, repoPath)
+		changed, deleted, parentBranch, err := detectChangedFiles(sdb, repoPath, branch)
 		if err != nil {
 			return fmt.Errorf("detecting changed files: %w", err)
 		}
-		if len(changed) == 0 && len(deleted) == 0 {
+		if len(changed) == 0 && len(deleted) == 0 && parentBranch == "" {
 			return nil // fast no-op path: nothing to do, meta is already current
 		}
 
-		res, err := syncFiles(ctx, sdb, project, repoPath, branch, changed, deleted, dryRun)
+		res, err := syncFiles(ctx, sdb, project, repoPath, branch, changed, deleted, parentBranch, dryRun)
 		if err != nil {
 			return err
 		}
@@ -95,18 +104,22 @@ func LazySync(ctx context.Context, project, repoPath string, dryRun bool) (LazyS
 }
 
 // detectChangedFiles returns the set of files changed/deleted since the last
-// sync. For git repositories this unions the working-tree diff
-// (git status) with a commit-range diff when HEAD moved since the last sync
-// (covering commits made outside nav's own git hooks). For non-git projects
-// it falls back to an mtime walk against the manifest's last-known files.
-func detectChangedFiles(sdb *db.DB, repoPath string) (changed, deleted []string, err error) {
+// sync, plus the parent branch this branch was bootstrapped from (non-empty
+// only the first time a branch's own database is synced, and only when one
+// was found — see detectParentBranch). For git repositories this unions the
+// working-tree diff (git status) with a commit-range diff when HEAD moved
+// since the last sync (covering commits made outside nav's own git hooks).
+// For non-git projects it falls back to an mtime walk against the
+// manifest's last-known files.
+func detectChangedFiles(sdb *db.DB, repoPath, branch string) (changed, deleted []string, parentBranch string, err error) {
 	if _, statErr := os.Stat(filepath.Join(repoPath, ".git")); statErr != nil {
-		return detectChangedFilesMtime(sdb, repoPath)
+		c, d, mErr := detectChangedFilesMtime(sdb, repoPath)
+		return c, d, "", mErr
 	}
 
 	statusChanged, statusDeleted, err := GitStatusFiles(repoPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	changedSet := make(map[string]bool)
@@ -121,19 +134,40 @@ func detectChangedFiles(sdb *db.DB, repoPath string) (changed, deleted []string,
 	head := HeadCommit(repoPath)
 	lastHead, ok, err := sdb.GetMeta(metaLastSyncHead)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	switch {
 	case !ok:
-		// Bootstrap: nav sync has never run against this repo before, so
-		// there is no baseline to diff against. Rather than only seeing a
-		// clean working tree and concluding nothing changed, treat every
-		// tracked file as "changed since last sync" — last sync being "the
-		// repo's creation" — so nav sync alone gets a fresh project fully
-		// indexed without requiring a separate `nav index` first.
-		if lsOut, lsErr := RunGitCmd(repoPath, "ls-files"); lsErr == nil {
-			for _, f := range SplitLines(lsOut) {
-				changedSet[f] = true
+		// Bootstrap: nav sync has never run against this branch before, so
+		// there is no baseline to diff against. If another branch nav has
+		// already indexed shares recent history with this one, treat that
+		// branch's tip as the baseline instead of the repo's creation — only
+		// what actually differs from it needs (re-)embedding, and everything
+		// else is served from that branch's existing points at search time
+		// (see BranchChain). Absent any such candidate, fall back to
+		// treating every tracked file as "changed since last sync", so a
+		// project with no history to inherit from still gets fully indexed
+		// without requiring a separate `nav index` first.
+		if parent, mergeBase, found := detectParentBranch(repoPath, branch); found {
+			raw, diffErr := RunGitCmd(repoPath, "diff", "--name-status", mergeBase, "HEAD")
+			if diffErr != nil {
+				fmt.Fprintf(os.Stderr, "nav: warn: diffing parent branch %s (%s..HEAD): %v\n", parent, mergeBase, diffErr)
+			} else {
+				c, d := ParseNameStatus(raw)
+				for _, f := range c {
+					changedSet[f] = true
+				}
+				for _, f := range d {
+					deletedSet[f] = true
+				}
+				parentBranch = parent
+			}
+		}
+		if parentBranch == "" {
+			if lsOut, lsErr := RunGitCmd(repoPath, "ls-files"); lsErr == nil {
+				for _, f := range SplitLines(lsOut) {
+					changedSet[f] = true
+				}
 			}
 		}
 	case head != "" && lastHead != head:
@@ -157,7 +191,63 @@ func detectChangedFiles(sdb *db.DB, repoPath string) (changed, deleted []string,
 		delete(changedSet, f)
 	}
 
-	return setToSlice(changedSet), setToSlice(deletedSet), nil
+	return setToSlice(changedSet), setToSlice(deletedSet), parentBranch, nil
+}
+
+// detectParentBranch finds the already-indexed local branch that branch most
+// likely forked from, so a brand-new branch's first sync can diff against
+// that fork point instead of re-embedding the whole tree. Candidates are
+// restricted to branches with their own nav database (db.Exists) — there's
+// nothing to inherit from a branch nav has never synced.
+//
+// Ranking: for each candidate, compute its merge-base with branch. The
+// candidate whose merge-base commit is most recent wins (the closest shared
+// history); ties (e.g. two candidates sharing the very same merge-base
+// commit, which happens when one candidate later merged the other) are
+// broken by preferring whichever candidate's own tip is fewest commits past
+// that merge-base — i.e. the more direct ancestor. A final lexical
+// tie-break keeps the choice deterministic.
+func detectParentBranch(repoPath, branch string) (parent, mergeBase string, found bool) {
+	branches, err := LocalBranches(repoPath)
+	if err != nil {
+		return "", "", false
+	}
+
+	var bestTime int64 = -1
+	var bestDist int = -1
+	for _, candidate := range branches {
+		if candidate == "" || candidate == branch {
+			continue
+		}
+		if !db.Exists(repoPath, candidate) {
+			continue
+		}
+		base, ok := MergeBase(repoPath, candidate, branch)
+		if !ok {
+			continue
+		}
+		ts, ok := CommitTimestamp(repoPath, base)
+		if !ok {
+			continue
+		}
+		dist, ok := CommitsAhead(repoPath, base, candidate)
+		if !ok {
+			continue
+		}
+
+		better := !found ||
+			ts > bestTime ||
+			(ts == bestTime && dist < bestDist) ||
+			(ts == bestTime && dist == bestDist && candidate < parent)
+		if better {
+			found = true
+			bestTime = ts
+			bestDist = dist
+			parent = candidate
+			mergeBase = base
+		}
+	}
+	return parent, mergeBase, found
 }
 
 // detectChangedFilesMtime is the non-git fallback: it walks the tree using
@@ -321,7 +411,7 @@ func diffSymbols(sdb *db.DB, fileSymbols map[string][]parser.Symbol, deletedFile
 // syncFiles re-parses changed files, diffs them against the manifest,
 // re-embeds and re-upserts only what's dirty, removes what's gone, and keeps
 // the knowledge graph in lockstep — all in the same run.
-func syncFiles(ctx context.Context, sdb *db.DB, project, repoPath, branch string, changedFiles, deletedFiles []string, dryRun bool) (LazySyncResult, error) {
+func syncFiles(ctx context.Context, sdb *db.DB, project, repoPath, branch string, changedFiles, deletedFiles []string, parentBranch string, dryRun bool) (LazySyncResult, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return LazySyncResult{}, fmt.Errorf("loading config: %w", err)
@@ -449,9 +539,17 @@ func syncFiles(ctx context.Context, sdb *db.DB, project, repoPath, branch string
 			}
 		}
 
+		dirtyByFile := make(map[string][]parser.Symbol, len(fileSymbols))
+		for _, s := range diff.dirty {
+			dirtyByFile[s.FilePath] = append(dirtyByFile[s.FilePath], s)
+		}
+		removedByFile := make(map[string][]string, len(fileSymbols))
+		for _, c := range diff.staleChunks {
+			removedByFile[c.File] = append(removedByFile[c.File], c.Symbol)
+		}
 		for rel, syms := range fileSymbols {
-			if err := rebuildFileGraph(tx, repoPath, rel, syms); err != nil {
-				return fmt.Errorf("rebuilding graph for %s: %w", rel, err)
+			if err := updateFileGraph(tx, repoPath, rel, syms, dirtyByFile[rel], removedByFile[rel]); err != nil {
+				return fmt.Errorf("updating graph for %s: %w", rel, err)
 			}
 		}
 		for _, rel := range deletedFiles {
@@ -462,6 +560,11 @@ func syncFiles(ctx context.Context, sdb *db.DB, project, repoPath, branch string
 
 		if head := HeadCommit(repoPath); head != "" {
 			if err := db.SetMeta(tx, metaLastSyncHead, head); err != nil {
+				return err
+			}
+		}
+		if parentBranch != "" {
+			if err := db.SetMeta(tx, metaParentBranch, parentBranch); err != nil {
 				return err
 			}
 		}
@@ -478,39 +581,75 @@ func hasAnyOldChunks(diff symbolDiff) bool {
 	return len(diff.oldChunkIDs) > 0
 }
 
-// rebuildFileGraph tears down rel's previous graph state and re-extracts it
-// from the current parse: package/file/symbol nodes, defines/embeds/
-// implements edges (self-contained, from internal/parser), then imports/
-// calls edges resolved against the persistent graph in tx — the whole point
-// of keeping the graph in SQLite rather than deriving it fresh each time is
-// that this resolution is a handful of indexed lookups, not a repo walk.
-func rebuildFileGraph(tx *sql.Tx, repoPath, rel string, symbols []parser.Symbol) error {
-	old, err := db.NodesInFile(tx, rel)
-	if err != nil {
-		return err
-	}
-	for _, n := range old {
-		if err := db.DeleteOutgoingEdges(tx, n.ID); err != nil {
+// updateFileGraph incrementally updates rel's persisted graph state: only
+// dirty symbols (whose content hash actually changed — the same split
+// diffSymbols already computed for the embedding manifest, so "what changed"
+// is derived exactly once per sync) get their node and outgoing edges
+// (defines, Go embeds/implements, calls) recomputed; removed symbols are
+// torn down; every unchanged symbol in the file — node, summary, and edges —
+// is left completely untouched. allSymbols (the file's full current parse)
+// is only used to give the package/file nodes their bootstrap, to give the
+// Go embeds/implements heuristics (which can look at a dirty symbol's
+// unchanged siblings) their full context, and to re-resolve the file's
+// "imports" edges, which are file-level rather than per-symbol and cheap
+// enough (proportional to import count, not symbol count) to just redo on
+// every sync of the file.
+//
+// One known imprecision, inherited from the existing best-effort graph (see
+// resolveSymbolCalls and goImplementsEdges): an "implements" edge depends on
+// a struct's method set, which lives on separate method symbols — so if a
+// method is renamed/added without the struct symbol itself changing, that
+// edge won't be recomputed until the struct (or that method) is next dirty.
+func updateFileGraph(tx *sql.Tx, repoPath, rel string, allSymbols, dirty []parser.Symbol, removed []string) error {
+	for _, name := range removed {
+		id := parser.SymbolNodeID(rel, name)
+		if err := db.DeleteOutgoingEdges(tx, id); err != nil {
 			return err
 		}
-		if err := db.DeleteNode(tx, n.ID); err != nil {
+		if err := db.DeleteNode(tx, id); err != nil {
 			return err
 		}
 	}
 
-	nodes, edges := parser.BuildFileNodes(rel, symbols)
-	for _, n := range nodes {
+	dir := parser.PackageDir(rel)
+	pkgID := parser.PackageNodeID(dir)
+	fileID := parser.FileNodeID(rel)
+	if err := db.UpsertNode(tx, db.Node{ID: pkgID, Kind: db.KindPackage, Name: dir}); err != nil {
+		return err
+	}
+	if err := db.UpsertNode(tx, db.Node{ID: fileID, Kind: db.KindFile, Name: filepath.Base(rel), File: rel}); err != nil {
+		return err
+	}
+	if err := db.InsertEdge(tx, db.Edge{Src: pkgID, Dst: fileID, Kind: db.EdgeDefines}); err != nil {
+		return err
+	}
+
+	aliasToPkg, err := resolveFileImports(tx, repoPath, rel)
+	if err != nil {
+		return err
+	}
+
+	if len(dirty) == 0 {
+		return nil
+	}
+
+	for _, sym := range dirty {
+		if err := db.DeleteOutgoingEdges(tx, parser.SymbolNodeID(rel, sym.Symbol)); err != nil {
+			return err
+		}
+	}
+	for _, n := range parser.DirtySymbolNodes(rel, dirty) {
 		if err := db.UpsertNode(tx, db.Node{ID: n.ID, Kind: n.Kind, Name: n.Name, File: n.File, Line: n.Line, Summary: n.Summary}); err != nil {
 			return err
 		}
 	}
-	for _, e := range edges {
+	for _, e := range parser.DirtySymbolEdges(rel, allSymbols, dirty) {
 		if err := db.InsertEdge(tx, db.Edge{Src: e.Src, Dst: e.Dst, Kind: e.Kind}); err != nil {
 			return err
 		}
 	}
 
-	return resolveFileCrossRefs(tx, repoPath, rel, symbols)
+	return resolveSymbolCalls(tx, rel, dir, aliasToPkg, dirty)
 }
 
 // teardownFileGraph removes every node (file + its symbols) defined in a
@@ -533,20 +672,25 @@ func teardownFileGraph(tx *sql.Tx, rel string) error {
 	return nil
 }
 
-// resolveFileCrossRefs resolves rel's imports and its symbols' calls against
-// the persistent graph: bare calls resolve within the caller's own package,
-// qualified calls (alias.Symbol) resolve by mapping the alias to an import,
-// then to a same-package symbol. Anything it can't confidently resolve is
-// left alone rather than guessed, per the spec.
-func resolveFileCrossRefs(tx *sql.Tx, repoPath, rel string, symbols []parser.Symbol) error {
+// resolveFileImports re-resolves rel's import statements against the
+// persistent graph and returns the alias -> package-node-id mapping
+// resolveSymbolCalls needs for qualified (alias.Symbol) calls. It always
+// clears and rebuilds rel's "imports" edges (DeleteOutgoingEdgesByKind), not
+// just the "defines" edges the caller manages separately — there's no cheap
+// signal for "did the import list change" short of re-parsing it, but this
+// is proportional to import count, not symbol count, so redoing it on every
+// sync of the file is cheap regardless of how many symbols in it are dirty.
+func resolveFileImports(tx *sql.Tx, repoPath, rel string) (map[string]string, error) {
 	lang := parser.DetectLanguage(rel)
 	source, err := os.ReadFile(filepath.Join(repoPath, rel))
 	if err != nil {
-		return nil // file vanished between listing and processing — nothing to resolve
+		return nil, nil // file vanished between listing and processing — nothing to resolve
 	}
 
 	fileID := parser.FileNodeID(rel)
-	dir := parser.PackageDir(rel)
+	if err := db.DeleteOutgoingEdgesByKind(tx, fileID, db.EdgeImports); err != nil {
+		return nil, err
+	}
 
 	aliasToPkg := make(map[string]string)
 	for _, imp := range parser.ExtractFileImports(lang, source) {
@@ -554,20 +698,32 @@ func resolveFileCrossRefs(tx *sql.Tx, repoPath, rel string, symbols []parser.Sym
 		if localDir, ok := resolveLocalImportDir(repoPath, rel, lang, imp.Path); ok {
 			dstID = parser.PackageNodeID(localDir)
 			if err := db.UpsertNode(tx, db.Node{ID: dstID, Kind: db.KindPackage, Name: localDir}); err != nil {
-				return err
+				return nil, err
 			}
 		} else {
 			dstID = parser.ExternalPackageNodeID(imp.Path)
 			if err := db.UpsertNode(tx, db.Node{ID: dstID, Kind: db.KindPackage, Name: imp.Path}); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		if err := db.InsertEdge(tx, db.Edge{Src: fileID, Dst: dstID, Kind: db.EdgeImports}); err != nil {
-			return err
+			return nil, err
 		}
 		aliasToPkg[imp.Alias] = dstID
 	}
 
+	return aliasToPkg, nil
+}
+
+// resolveSymbolCalls resolves symbols' calls against the persistent graph:
+// bare calls resolve within the caller's own package, qualified calls
+// (alias.Symbol) resolve by mapping the alias to an import, then to a
+// same-package symbol. Anything it can't confidently resolve is left alone
+// rather than guessed, per the spec. It's only ever called with a file's
+// dirty symbols — an unchanged symbol's own calls list, extracted from its
+// unchanged content, is still accurate, so its previously-resolved edges
+// need no rework.
+func resolveSymbolCalls(tx *sql.Tx, rel, dir string, aliasToPkg map[string]string, symbols []parser.Symbol) error {
 	for _, sym := range symbols {
 		callerID := parser.SymbolNodeID(rel, sym.Symbol)
 		for _, call := range sym.Calls {

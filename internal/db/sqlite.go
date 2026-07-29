@@ -93,6 +93,15 @@ func DBPath(repoRoot, branch string) string {
 	return filepath.Join(repoRoot, ".nav", "nav-"+branchFileToken(branch)+".db")
 }
 
+// Exists reports whether branch already has a database file under repoRoot —
+// i.e. whether nav has synced/indexed it before. It's used to restrict
+// parent-branch candidates to branches that actually have embeddings to
+// inherit from.
+func Exists(repoRoot, branch string) bool {
+	_, err := os.Stat(DBPath(repoRoot, branch))
+	return err == nil
+}
+
 // LockPath returns the path to <repoRoot>/.nav/lock. The lock is shared
 // across every branch: it serialises concurrent sync invocations against the
 // same working tree (e.g. an overlapping git hook and prompt hook), not
