@@ -64,7 +64,7 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("installing git hook: %w", err)
 		}
 		if installed {
-			fmt.Printf("nav git hooks installed in %s/.git/hooks/ (pre-commit + pre-push + post-merge + post-rewrite + reference-transaction)\n", path)
+			fmt.Printf("nav git hooks installed in %s/.git/hooks/ (pre-commit + post-merge + post-rewrite + reference-transaction)\n", path)
 		} else {
 			fmt.Printf("nav git hooks already installed in %s/.git/hooks/, skipping\n", path)
 		}
@@ -207,7 +207,7 @@ func runHookUninstall(cmd *cobra.Command, args []string) error {
 		if err := hook.Uninstall(path); err != nil {
 			return fmt.Errorf("uninstalling git hook: %w", err)
 		}
-		fmt.Printf("nav git hooks removed from %s/.git/hooks/ (pre-commit + pre-push + post-merge + post-rewrite + reference-transaction)\n", path)
+		fmt.Printf("nav git hooks removed from %s/.git/hooks/ (pre-commit + post-merge + post-rewrite + reference-transaction)\n", path)
 
 	case "claude":
 		var settingsPath string
@@ -292,7 +292,7 @@ var hookRunCmd = &cobra.Command{
 }
 
 func init() {
-	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git", "git-pre-push", "git-post-merge", "claude", "claude-session-start", "qwen", "cursor", or "opencode" (required)`)
+	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git", "git-post-merge", "claude", "claude-session-start", "qwen", "cursor", or "opencode" (required)`)
 	hookRunCmd.Flags().StringVar(&hookRunPath, "path", ".", "Repository path (for git hooks)")
 	hookRunCmd.Flags().IntVar(&hookRunTop, "top", 5, "Number of results to inject (for claude, qwen, cursor, and opencode hooks)")
 	hookRunCmd.Flags().StringVar(&hookRunQuery, "query", "", "Query text (for claude, qwen, cursor, and opencode hooks)")
@@ -304,9 +304,6 @@ func runHookRun(cmd *cobra.Command, args []string) error {
 	switch hookRunType {
 	case "git":
 		return runHookRunGit(hookRunPath)
-
-	case "git-pre-push":
-		return runHookRunPrePush(hookRunPath)
 
 	case "git-post-merge":
 		return runHookRunPostMerge(hookRunPath)
@@ -347,7 +344,7 @@ func runHookRun(cmd *cobra.Command, args []string) error {
 		return runHookRunOpenCode(project, path, hookRunQuery, hookRunTop)
 
 	default:
-		return fmt.Errorf("unknown hook type %q; must be \"git\", \"git-pre-push\", \"git-post-merge\", \"claude\", \"claude-session-start\", \"qwen\", \"cursor\", or \"opencode\"", hookRunType)
+		return fmt.Errorf("unknown hook type %q; must be \"git\", \"git-post-merge\", \"claude\", \"claude-session-start\", \"qwen\", \"cursor\", or \"opencode\"", hookRunType)
 	}
 }
 
@@ -369,26 +366,20 @@ func runHookRunClaudeSessionStart(project, path string) error {
 	return nil
 }
 
-// runHookRunGit handles the git pre-commit hook, runHookRunPrePush the
-// pre-push hook, and runHookRunPostMerge the post-merge/post-rewrite/
-// reference-transaction hooks (every flavor of `git pull`, see git.go): all
-// three just trigger a lazy sync. Routing through services.GitHookSync —
-// rather than diffing staged/merged files and re-indexing them directly —
-// means every git hook run is validated against the same SQLite manifest the
-// prompt hooks use, so a file already synced (by a previous hook run, or by a
-// prompt hook in between) is never re-embedded for nothing. That's the
-// pre-push hook's whole job: it revalidates local state against the manifest
-// right before it leaves the machine, and content whose hash hasn't moved
-// since the last sync is skipped rather than re-embedded. On the pull side,
-// the same lazy sync re-diffs against the last synced HEAD, so every object
-// touched by the incoming commits gets re-parsed and, where its content hash
-// actually changed, re-embedded and written back to Qdrant and the local
-// SQLite state.
+// runHookRunGit handles the git pre-commit hook and runHookRunPostMerge the
+// post-merge/post-rewrite/reference-transaction hooks (every flavor of
+// `git pull`, see git.go): both just trigger a lazy sync — on commit and on
+// pull, the only two events that can actually change what's on disk.
+// Pushing doesn't, so there is deliberately no pre-push hook triggering a
+// sync. Routing through services.GitHookSync — rather than diffing staged/
+// merged files and re-indexing them directly — means every git hook run is
+// validated against the same SQLite manifest the prompt hooks use, so a file
+// already synced (by a previous hook run, or by a prompt hook in between) is
+// never re-embedded for nothing. On the pull side, the lazy sync re-diffs
+// against the last synced HEAD, so every object touched by the incoming
+// commits gets re-parsed and, where its content hash actually changed,
+// re-embedded and written back to Qdrant and the local SQLite state.
 func runHookRunGit(repoPath string) error {
-	return runGitHookSync(repoPath)
-}
-
-func runHookRunPrePush(repoPath string) error {
 	return runGitHookSync(repoPath)
 }
 

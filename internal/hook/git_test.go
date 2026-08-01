@@ -36,7 +36,7 @@ func TestInstallWritesAllGitHooks(t *testing.T) {
 		t.Error("expected installed = true on a fresh repo")
 	}
 
-	for _, name := range []string{"pre-commit", "pre-push", "post-merge", "post-rewrite", "reference-transaction"} {
+	for _, name := range []string{"pre-commit", "post-merge", "post-rewrite", "reference-transaction"} {
 		path := filepath.Join(repo, ".git", "hooks", name)
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -47,19 +47,11 @@ func TestInstallWritesAllGitHooks(t *testing.T) {
 		}
 	}
 
-	// The pre-push hook must respect the skip env var, matching pre-commit,
-	// and trigger its own "git-pre-push" run type so it can be validated
-	// against the manifest independently of pre-commit.
-	prePush, err := os.ReadFile(filepath.Join(repo, ".git", "hooks", "pre-push"))
-	if err != nil {
-		t.Fatalf("reading pre-push: %v", err)
-	}
-	prePushContent := string(prePush)
-	if !strings.Contains(prePushContent, `-n "$NAV_SKIP"`) {
-		t.Errorf("pre-push hook missing NAV_SKIP guard, got:\n%s", prePushContent)
-	}
-	if !strings.Contains(prePushContent, "--type git-pre-push") {
-		t.Errorf("pre-push hook should trigger the git-pre-push run type, got:\n%s", prePushContent)
+	// nav must not install a pre-push hook: indexing only ever runs on
+	// commit and on pull, never on push (a push doesn't change what's on
+	// disk, so there's nothing to (re-)index).
+	if _, err := os.Stat(filepath.Join(repo, ".git", "hooks", "pre-push")); !os.IsNotExist(err) {
+		t.Errorf("expected no pre-push hook to be installed, stat err = %v", err)
 	}
 
 	// The post-rewrite hook must gate on $1 = "rebase" so it doesn't fire on
@@ -199,11 +191,31 @@ func TestUninstallRemovesAllGitHooks(t *testing.T) {
 		t.Fatalf("Uninstall: %v", err)
 	}
 
-	for _, name := range []string{"pre-commit", "pre-push", "post-merge", "post-rewrite", "reference-transaction"} {
+	for _, name := range []string{"pre-commit", "post-merge", "post-rewrite", "reference-transaction"} {
 		path := filepath.Join(repo, ".git", "hooks", name)
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Errorf("expected %s to be removed, stat err = %v", name, err)
 		}
+	}
+}
+
+// TestUninstallRemovesLegacyPrePushHook guards backward compatibility: an
+// older nav version installed a pre-push hook that synced on push; current
+// nav no longer installs one, but `nav hook uninstall` must still clean up
+// one left behind by that older version.
+func TestUninstallRemovesLegacyPrePushHook(t *testing.T) {
+	repo := initRepo(t)
+	path := filepath.Join(repo, ".git", "hooks", "pre-push")
+	legacy := "#!/usr/bin/env bash\n# nav-hook\n# nav pre-push hook\nnav hook run --type git-pre-push --path \"$(git rev-parse --show-toplevel)\"\nexit 0\n"
+	if err := os.WriteFile(path, []byte(legacy), 0755); err != nil {
+		t.Fatalf("seeding legacy pre-push hook: %v", err)
+	}
+
+	if err := Uninstall(repo); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected legacy pre-push hook to be removed, stat err = %v", err)
 	}
 }
 

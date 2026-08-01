@@ -20,21 +20,6 @@ nav hook run --type git --path "$(git rev-parse --show-toplevel)"
 exit 0
 `
 
-// gitPrePushHookScript backs the pre-push hook: before any local commits
-// leave the machine, it runs the same lazy sync the other hooks do, so the
-// index is validated against the current manifest first — content that's
-// already up to date (hash unchanged since the last sync) is skipped rather
-// than re-embedded, and only what's actually dirty gets pushed through the
-// update. It never blocks the push: sync failures are surfaced by `nav hook
-// run` but the hook itself always exits 0.
-const gitPrePushHookScript = `#!/usr/bin/env bash
-# nav-hook
-# nav pre-push hook
-[ -n "$%s" ] && exit 0
-nav hook run --type git-pre-push --path "$(git rev-parse --show-toplevel)"
-exit 0
-`
-
 const gitPostMergeHookScript = `#!/usr/bin/env bash
 # nav-hook
 # nav post-merge hook
@@ -80,12 +65,17 @@ done
 exit 0
 `
 
-// Install writes the nav pre-commit, pre-push, post-merge, post-rewrite, and
+// Install writes the nav pre-commit, post-merge, post-rewrite, and
 // reference-transaction hooks to <repoPath>/.git/hooks/. It sets the skip
 // env var name from cfg.Hooks.GitSkipEnv. If a hook already exists and is
 // NOT a nav hook, it appends the nav call rather than overwriting. It
 // returns installed=false when every hook was already present, so callers
 // can tell a no-op apart from a fresh install.
+//
+// There is deliberately no pre-push hook: indexing/embedding only ever runs
+// on commit (pre-commit) and on pull (post-merge/post-rewrite/
+// reference-transaction, covering every flavor of `git pull`) — a push
+// doesn't change what's on disk, so there's nothing for it to (re-)index.
 func Install(repoPath string, cfg *config.Config) (installed bool, err error) {
 	gitDir := filepath.Join(repoPath, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
@@ -100,11 +90,6 @@ func Install(repoPath string, cfg *config.Config) (installed bool, err error) {
 	preCommitInstalled, err := installHook(hooksDir, "pre-commit", fmt.Sprintf(gitHookScript, cfg.Hooks.GitSkipEnv), "# nav-hook-append\nnav hook run --type git --path \"$(git rev-parse --show-toplevel)\"\n")
 	if err != nil {
 		return false, fmt.Errorf("installing pre-commit hook: %w", err)
-	}
-
-	prePushInstalled, err := installHook(hooksDir, "pre-push", fmt.Sprintf(gitPrePushHookScript, cfg.Hooks.GitSkipEnv), "# nav-hook-append\nnav hook run --type git-pre-push --path \"$(git rev-parse --show-toplevel)\"\n")
-	if err != nil {
-		return false, fmt.Errorf("installing pre-push hook: %w", err)
 	}
 
 	postMergeInstalled, err := installHook(hooksDir, "post-merge", gitPostMergeHookScript, "# nav-hook-append\nnav hook run --type git-post-merge --path \"$(git rev-parse --show-toplevel)\"\n")
@@ -132,7 +117,7 @@ func Install(repoPath string, cfg *config.Config) (installed bool, err error) {
 		return false, fmt.Errorf("installing reference-transaction hook: %w", err)
 	}
 
-	return preCommitInstalled || prePushInstalled || postMergeInstalled || postRewriteInstalled || refTxInstalled, nil
+	return preCommitInstalled || postMergeInstalled || postRewriteInstalled || refTxInstalled, nil
 }
 
 // installHook writes or appends a nav hook script to the given hook file. It
@@ -171,10 +156,12 @@ func installHook(hooksDir, hookName, fullScript, appendBlock string) (installed 
 	return true, nil
 }
 
-// Uninstall removes the nav pre-commit, pre-push, post-merge, post-rewrite,
-// and reference-transaction hooks from <repoPath>/.git/hooks/. If a hook
-// file was entirely nav-generated (contains the nav marker), it removes the
-// file. If it was appended, it removes only the nav lines.
+// Uninstall removes the nav pre-commit, post-merge, post-rewrite, and
+// reference-transaction hooks from <repoPath>/.git/hooks/. If a hook file
+// was entirely nav-generated (contains the nav marker), it removes the
+// file. If it was appended, it removes only the nav lines. It also cleans
+// up a pre-push hook left behind by an older nav version, which used to
+// sync on push; nav no longer installs one.
 func Uninstall(repoPath string) error {
 	hooksDir := filepath.Join(repoPath, ".git", "hooks")
 

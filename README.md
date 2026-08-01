@@ -2,7 +2,7 @@
 
 CLI tool for parsing source code repositories into semantically rich, searchable code units — and keeping them fresh as the codebase evolves.
 
-`nav` slices a repository into functions, methods, and classes using tree-sitter, enriches each unit with an LLM-generated summary via OpenRouter, converts the result into vector embeddings, and stores everything in Qdrant. Two integration points keep the index alive: git hooks (pre-commit, pre-push, and every flavor of pull) that patch changed symbols as they happen, and a Claude Code hook that injects relevant code context into every AI-assisted session.
+`nav` slices a repository into functions, methods, and classes using tree-sitter, enriches each unit with an LLM-generated summary via OpenRouter, converts the result into vector embeddings, and stores everything in Qdrant. Two integration points keep the index alive: git hooks (pre-commit and every flavor of pull — never push, which doesn't change what's on disk) that patch changed symbols as they happen, and a Claude Code hook that injects relevant code context into every AI-assisted session.
 
 ---
 
@@ -152,7 +152,7 @@ nav/
 │   │   └── migrations/            # embedded SQL schema migrations
 │   │
 │   ├── hook/
-│   │   ├── git.go                 # install/uninstall/run git pre-commit/pre-push/post-merge/post-rewrite/reference-transaction hooks
+│   │   ├── git.go                 # install/uninstall/run git pre-commit/post-merge/post-rewrite/reference-transaction hooks
 │   │   └── claude.go              # install/uninstall/run Claude Code hooks (prompt + session start)
 │   │
 │   └── config/
@@ -231,7 +231,7 @@ indexing:
   min_lines: 3                   # skip symbols shorter than N lines
 
 hooks:
-  git_skip_env: NAV_SKIP         # env var checked by the pre-commit and pre-push hooks
+  git_skip_env: NAV_SKIP         # env var checked by the pre-commit hook
   claude_top_k: 5                # how many results to inject into Claude context
 ```
 
@@ -726,31 +726,30 @@ Or point `qdrant.url` at any Qdrant Cloud instance.
 
 ## Git Hook Integration
 
-nav installs five git hooks that keep the Qdrant index and local knowledge
-graph in sync automatically, on every commit, every push, *and* every way of
-pulling changes in — plain, `--ff-only` (the common case when you're just
-catching up), true merge, or `--rebase`:
+nav installs four git hooks that keep the Qdrant index and local knowledge
+graph in sync automatically, on every commit *and* every way of pulling
+changes in — plain, `--ff-only` (the common case when you're just catching
+up), true merge, or `--rebase`. There is deliberately no push hook: a push
+doesn't change anything on disk, so there is nothing for nav to (re-)index.
 
 | Hook | Fires on | Action |
 |---|---|---|
 | `pre-commit` | `git commit` | re-parses and upserts only the staged files |
-| `pre-push` | `git push`, before the commits leave the machine | runs the lazy sync (`nav sync`), validating every chunk's content hash against the manifest first — anything already up to date is skipped, not re-embedded |
 | `post-merge` | `git merge` producing an actual merge commit (and therefore `git pull` when it isn't a fast-forward) | runs the lazy sync (`nav sync`) |
 | `post-rewrite` | `git rebase` (reason `rebase`), and therefore `git pull --rebase` when it actually replays commits | runs the lazy sync (`nav sync`) |
 | `reference-transaction` | any update to the checked-out branch's own ref | runs the lazy sync (`nav sync`) |
 
 Every one of these hooks funnels into the same lazy sync (`services.LazySync`),
-which is what makes both halves of this cheap and correct: it diffs the
-working tree and, when `HEAD` has moved since the last sync, the commit range
-too, then re-parses only the files that touched and re-embeds only the
-symbols whose content hash actually changed. A chunk whose hash matches what
-the manifest already has is left alone — that's the "skip if already
-up to date" behavior `pre-push` relies on to stay a near no-op on repeated
-pushes. On the pull side, `post-merge`/`post-rewrite`/`reference-transaction`
-diff against the last synced `HEAD`, so every object touched by the incoming
-commits gets revalidated and, where it's actually dirty, re-embedded and
-written back to both Qdrant and the local SQLite state — never silently
-missed just because the pull happened to be a fast-forward.
+which is what makes this cheap and correct: it diffs the working tree and,
+when `HEAD` has moved since the last sync, the commit range too, then
+re-parses only the files that touched and re-embeds only the symbols whose
+content hash actually changed. A chunk whose hash matches what the manifest
+already has is left alone. On the pull side, `post-merge`/`post-rewrite`/
+`reference-transaction` diff against the last synced `HEAD`, so every object
+touched by the incoming commits gets revalidated and, where it's actually
+dirty, re-embedded and written back to both Qdrant and the local SQLite
+state — never silently missed just because the pull happened to be a
+fast-forward.
 
 `post-merge` and `post-rewrite` sound like they should cover every `git
 pull`, but they don't: git skips its merge/rebase machinery entirely for a
@@ -772,24 +771,17 @@ per-branch (see [Directory Layout](#directory-layout)).
    `git diff --cached --name-only` for the staged files, re-parses and
    upserts them into Qdrant, and removes symbols from deleted files. It
    exits 0 either way — it never blocks the commit.
-2. `git push` triggers `.git/hooks/pre-push` before any commits leave the
-   machine, which calls `nav hook run --type git-pre-push --path .`: this
-   runs the same lazy sync, so every chunk gets validated against the
-   manifest's content hash first. Content whose hash is unchanged since the
-   last sync is skipped outright rather than re-embedded; only what's
-   actually dirty (e.g. commits made with `NAV_SKIP=1`, or from another
-   machine) gets processed. It never blocks the push.
-3. A real `git merge` (a merge commit, not a fast-forward) triggers
+2. A real `git merge` (a merge commit, not a fast-forward) triggers
    `.git/hooks/post-merge`, which calls
    `nav hook run --type git-post-merge --path .`: this runs the same lazy
    sync `nav sync` does, detecting every file that changed since the last
    sync (via the commit range, not just the merge itself), revalidating each
    one against the manifest, and re-embedding only what's dirty.
-4. An actual `git rebase` replay triggers `.git/hooks/post-rewrite` with
+3. An actual `git rebase` replay triggers `.git/hooks/post-rewrite` with
    `$1=rebase`; the hook forwards to the same `git-post-merge` run type as
    above. `git commit --amend` also fires `post-rewrite`, but with
    `$1=amend`, which the hook ignores.
-5. Any update to the checked-out branch's own ref (or `HEAD`) — a
+4. Any update to the checked-out branch's own ref (or `HEAD`) — a
    fast-forward pull, a merge, a rebase, a commit, a branch switch — fires
    `.git/hooks/reference-transaction` with a `committed` transaction state
    and the updated ref on stdin; the hook checks the ref against
@@ -797,28 +789,25 @@ per-branch (see [Directory Layout](#directory-layout)).
    before forwarding to `git-post-merge` too, so it ignores `git fetch`
    updating only `refs/remotes/...`.
 
+`git push` triggers no hook at all — a push only moves a remote ref, it never
+changes a file on the machine running it, so there is nothing for nav to
+re-index.
+
 ### Installation
 
 ```bash
 nav hook install --type git --project mokosh --path ~/work/mokosh
 ```
 
-This writes `.git/hooks/pre-commit`, `.git/hooks/pre-push`,
-`.git/hooks/post-merge`, `.git/hooks/post-rewrite`, and
-`.git/hooks/reference-transaction` in the target repository:
+This writes `.git/hooks/pre-commit`, `.git/hooks/post-merge`,
+`.git/hooks/post-rewrite`, and `.git/hooks/reference-transaction` in the
+target repository:
 
 ```bash
 #!/usr/bin/env bash
 # pre-commit
 [ -n "$NAV_SKIP" ] && exit 0
 nav hook run --type git --path "$(git rev-parse --show-toplevel)"
-```
-
-```bash
-#!/usr/bin/env bash
-# pre-push
-[ -n "$NAV_SKIP" ] && exit 0
-nav hook run --type git-pre-push --path "$(git rev-parse --show-toplevel)"
 ```
 
 ```bash
@@ -859,7 +848,7 @@ The hook respects the `NAV_SKIP` environment variable (configurable via `hooks.g
 NAV_SKIP=1 git commit -m "wip: scratch work"
 ```
 
-This is the equivalent of `--no-verify` for nav. Commits made with `NAV_SKIP=1` can be reprocessed later with `nav sync`. Setting it also skips the `pre-push` hook (`NAV_SKIP=1 git push`), for the same reason.
+This is the equivalent of `--no-verify` for nav. Commits made with `NAV_SKIP=1` can be reprocessed later with `nav sync`.
 
 ### Replaying skipped commits
 
@@ -875,10 +864,11 @@ nav sync --project mokosh --path ~/work/mokosh --since HEAD~5
 nav hook uninstall --type git --path ~/work/mokosh
 ```
 
-Removes the nav portion of `.git/hooks/pre-commit`, `pre-push`, `post-merge`,
+Removes the nav portion of `.git/hooks/pre-commit`, `post-merge`,
 `post-rewrite`, and `reference-transaction` (the whole file if nav owned it
 outright, or just nav's appended lines if it was layered onto an existing
-hook). Does not touch the Qdrant index.
+hook), and cleans up a `pre-push` hook left behind by an older nav version
+(current nav doesn't install one). Does not touch the Qdrant index.
 
 ---
 
