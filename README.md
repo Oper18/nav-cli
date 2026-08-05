@@ -537,7 +537,7 @@ nav hook install   [project] --type claude
 nav hook uninstall          --type git    --path <repo-root>
 nav hook uninstall          --type claude
 nav hook run        [project] --type git                   --path <repo-root>   # called by the git hook itself
-nav hook run        [project] --type claude                --query <text>       # called on UserPromptSubmit
+nav hook run        [project] --type claude                --query-stdin        # called on UserPromptSubmit (query piped in via jq, see below)
 nav hook run        [project] --type claude-session-start                        # called on SessionStart
 ```
 
@@ -886,7 +886,7 @@ Claude starts oriented in the codebase before it reads a single file.
 **Every prompt:**
 
 1. The user sends a message to Claude Code inside a project.
-2. The `UserPromptSubmit` hook fires and calls `nav hook run --type claude --query "<user message>"`.
+2. The `UserPromptSubmit` hook fires and calls `jq -r '.prompt' | nav hook run --type claude --query-stdin` — Claude Code passes the prompt as the `"prompt"` field of a JSON payload on stdin, not as an env var, so `jq` pulls it out and `--query-stdin` reads the result. (An earlier version of this hook referenced a `$CLAUDE_USER_PROMPT` env var that Claude Code never actually sets, so it silently never matched anything — if your installed hook still has that in it, reinstall with `nav hook install --type claude`.)
 3. `nav` first runs the lazy sync path in-process (§ `nav sync`) so the index reflects any edits made since the last prompt — a near no-op when nothing changed.
 4. `nav` embeds the query, searches Qdrant for the top-K most relevant symbols, and writes a context block to stdout.
 5. Claude Code injects that block into the conversation context before processing the user's request.
@@ -908,7 +908,7 @@ This writes the hook entry into `.claude/settings.json` in the current working d
         "hooks": [
           {
             "type": "command",
-            "command": "nav hook run --type claude --project mokosh --top 5 --query \"$CLAUDE_USER_PROMPT\""
+            "command": "jq -r '.prompt' | nav hook run mokosh --type claude --top 5 --query-stdin"
           }
         ]
       }

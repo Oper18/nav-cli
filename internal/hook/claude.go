@@ -10,7 +10,7 @@ import (
 
 // ClaudeHookEntry represents one hook entry in settings.json.
 type ClaudeHookEntry struct {
-	Matcher string      `json:"matcher"`
+	Matcher string       `json:"matcher"`
 	Hooks   []ClaudeHook `json:"hooks"`
 }
 
@@ -58,8 +58,13 @@ func InstallClaude(settingsPath, project string, topK int) (installed bool, err 
 		return false, err
 	}
 
+	// Claude Code never sets a $CLAUDE_USER_PROMPT env var — the prompt only
+	// ever arrives as the "prompt" field of the JSON payload piped to the
+	// hook on stdin, so the command extracts it with jq and hands it to nav
+	// via --query-stdin rather than referencing a variable that's always
+	// empty (which made the hook silently never fire any search).
 	promptCommand := fmt.Sprintf(
-		"nav hook run %s --type claude --top %d --query \"$CLAUDE_USER_PROMPT\"",
+		"jq -r '.prompt' | nav hook run %s --type claude --top %d --query-stdin",
 		project, topK,
 	)
 	promptAdded := addClaudeHookEntry(settings, "UserPromptSubmit", promptCommand, claudeUserPromptMarker)

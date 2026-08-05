@@ -41,8 +41,12 @@ func InstallQwen(settingsPath, project string, topK int) (installed bool, err er
 		settings["hooks"] = hooks
 	}
 
+	// Qwen Code, like Claude Code, never sets a $QWEN_USER_PROMPT env var —
+	// the prompt only arrives as the "prompt" field of the JSON payload piped
+	// to the hook on stdin, so the command extracts it with jq and hands it
+	// to nav via --query-stdin (see InstallClaude for the same fix).
 	navCommand := fmt.Sprintf(
-		"nav hook run %s --type qwen --top %d --query \"$QWEN_USER_PROMPT\"",
+		"jq -r '.prompt' | nav hook run %s --type qwen --top %d --query-stdin",
 		project, topK,
 	)
 
@@ -116,7 +120,7 @@ func QwenDefaultSettingsPath(dir string) string {
 	if _, err := os.Stat(subdirPath); err == nil {
 		return subdirPath
 	}
-	
+
 	// Fallback: check for Qwen configuration in home directory
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -134,7 +138,11 @@ func QwenGlobalSettingsPath() string {
 	return filepath.Join(home, ".qwen", "settings.json")
 }
 
-// entryContainsNavQwen reports whether a raw hook entry map contains the nav Qwen command.
+// entryContainsNavQwen reports whether a raw hook entry map contains the nav
+// Qwen command. It matches on "--type qwen" rather than the full "nav hook
+// run --type qwen" prefix, because the actual command has the project name
+// sitting between "run" and "--type" (see navCommand above) — matching the
+// full prefix would never find the entry, making install non-idempotent.
 func entryContainsNavQwen(entry map[string]interface{}) bool {
 	hookList, ok := entry["hooks"].([]interface{})
 	if !ok {
@@ -145,7 +153,7 @@ func entryContainsNavQwen(entry map[string]interface{}) bool {
 		if !ok {
 			continue
 		}
-		if cmd, _ := hm["command"].(string); strings.Contains(cmd, "nav hook run --type qwen") {
+		if cmd, _ := hm["command"].(string); strings.Contains(cmd, "--type qwen") {
 			return true
 		}
 	}

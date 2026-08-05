@@ -317,7 +317,12 @@ func embedAndUpsertSymbols(
 		}
 	}
 
-	fmt.Printf("Summarising %d symbols", len(symbols))
+	// Progress output goes to stderr, not stdout: this path also runs inside
+	// assistant hooks (services.HookSearch -> SyncBeforeSearch), and some
+	// hook runtimes (Qwen Code's UserPromptSubmit) require stdout to be
+	// nothing but a single well-formed JSON object — any progress line ahead
+	// of it breaks their JSON parse and silently drops the injected context.
+	fmt.Fprintf(os.Stderr, "Summarising %d symbols", len(symbols))
 	responses, _ := llmClient.SummariseBatch(ctx, requests, concurrency)
 
 	// Apply summaries and the LLM-derived business metadata.
@@ -329,7 +334,7 @@ func embedAndUpsertSymbols(
 			symbols[i].Responsibilities = responses[i].Responsibilities
 		}
 	}
-	fmt.Println(" done")
+	fmt.Fprintln(os.Stderr, " done")
 
 	// Build embedding inputs and embed in batches of 20 via OpenRouter. A
 	// single input that exceeds the embedding model's token limit makes the whole
@@ -364,19 +369,19 @@ func embedAndUpsertSymbols(
 		fmt.Fprintf(os.Stderr, "note: split %d oversized symbol(s) into multiple chunks to fit the embedding token limit\n", split)
 	}
 
-	fmt.Printf("Embedding %d chunks", len(texts))
+	fmt.Fprintf(os.Stderr, "Embedding %d chunks", len(texts))
 	completed := int32(0)
 	vectors, err := embedBatchesConcurrently(texts, func(batch []string) ([][]float32, error) {
 		return llmClient.Embed(ctx, cfg.Embedding.Model, batch)
 	}, func() {
 		if n := atomic.AddInt32(&completed, 1); n%5 == 0 {
-			fmt.Print(".")
+			fmt.Fprint(os.Stderr, ".")
 		}
 	})
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(" done")
+	fmt.Fprintln(os.Stderr, " done")
 
 	// Build Points (one per chunk) and upsert.
 	points := make([]qdrant.Point, len(texts))
@@ -395,7 +400,7 @@ func embedAndUpsertSymbols(
 
 	// Upsert in batches to avoid overly large requests.
 	const upsertBatch = 100
-	fmt.Printf("Upserting %d chunks", len(points))
+	fmt.Fprintf(os.Stderr, "Upserting %d chunks", len(points))
 	processed := 0
 	for start := 0; start < len(points); start += upsertBatch {
 		end := start + upsertBatch
@@ -407,10 +412,10 @@ func embedAndUpsertSymbols(
 		}
 		processed += end - start
 		if processed%10 == 0 || processed == len(points) {
-			fmt.Print(".")
+			fmt.Fprint(os.Stderr, ".")
 		}
 	}
-	fmt.Println(" done")
+	fmt.Fprintln(os.Stderr, " done")
 
 	return points, nil
 }

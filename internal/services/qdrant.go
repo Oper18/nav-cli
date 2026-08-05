@@ -56,12 +56,15 @@ func EnsureLocalQdrant(cfg *config.Config) error {
 			return err
 		}
 		if running {
-			fmt.Printf("nav: container %q is running but unhealthy, restarting via %s…\n", QdrantContainerName, rt.Cmd)
+			// stderr, not stdout: this runs inside assistant hooks too (via
+			// SyncBeforeSearch), where stdout must stay reserved for the
+			// hook's own output contract (see SyncBeforeSearch).
+			fmt.Fprintf(os.Stderr, "nav: container %q is running but unhealthy, restarting via %s…\n", QdrantContainerName, rt.Cmd)
 			if err := rt.Restart(QdrantContainerName); err != nil {
 				return fmt.Errorf("restarting %s: %w", QdrantContainerName, err)
 			}
 		} else {
-			fmt.Printf("nav: starting existing container %q via %s…\n", QdrantContainerName, rt.Cmd)
+			fmt.Fprintf(os.Stderr, "nav: starting existing container %q via %s…\n", QdrantContainerName, rt.Cmd)
 			if err := rt.Start(QdrantContainerName); err != nil {
 				return fmt.Errorf("starting %s: %w", QdrantContainerName, err)
 			}
@@ -71,7 +74,7 @@ func EnsureLocalQdrant(cfg *config.Config) error {
 		if err := os.MkdirAll(dbDir, 0o755); err != nil {
 			return fmt.Errorf("creating qdrant data dir %s: %w", dbDir, err)
 		}
-		fmt.Printf("nav: launching %s container %q with data dir %s\n", rt.Cmd, QdrantContainerName, dbDir)
+		fmt.Fprintf(os.Stderr, "nav: launching %s container %q with data dir %s\n", rt.Cmd, QdrantContainerName, dbDir)
 		if err := rt.Run(RunOpts{
 			Name:  QdrantContainerName,
 			Image: QdrantImage,
