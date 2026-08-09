@@ -66,3 +66,14 @@ func (c *Client) DeleteByFilter(ctx context.Context, collection string, filters 
 func (c *Client) Search(ctx context.Context, collection string, vector []float32, limit int, minScore float64, filters map[string]string, branchIn []string) ([]qdrant.Hit, error) {
 	return c.Qdrant.Search(ctx, collection, vector, limit, minScore, filters, branchIn)
 }
+
+// ExistingIDs returns the subset of ids that already have a point in collection.
+func (c *Client) ExistingIDs(ctx context.Context, collection string, ids []string) (map[string]bool, error) {
+	return c.Qdrant.ExistingIDs(ctx, collection, ids)
+}
+
+// CollectionPointsCount returns the approximate number of points in the
+// named collection, and false when the collection doesn't exist.
+func (c *Client) CollectionPointsCount(ctx context.Context, name string) (int64, bool, error) {
+	return c.Qdrant.CollectionPointsCount(ctx, name)
+}

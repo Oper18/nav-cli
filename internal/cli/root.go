@@ -29,6 +29,8 @@ func init() {
 	rootCmd.AddCommand(hookCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(repoCmd)
+	rootCmd.AddCommand(deleteCmd)
+	rootCmd.AddCommand(listCmd)
 
 	hookCmd.AddCommand(hookInstallCmd)
 	hookCmd.AddCommand(hookUninstallCmd)

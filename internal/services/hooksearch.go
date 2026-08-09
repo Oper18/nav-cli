@@ -28,20 +28,32 @@ func SyncBeforeSearch(ctx context.Context, project, path string) {
 	}
 }
 
-// GitHookSync runs a lazy sync against repoPath under the default project
-// name, for the git pre-commit/post-merge hooks (which carry no project
-// flag).
+// GitHookSync runs a lazy sync against repoPath for the git pre-commit/
+// post-merge hooks, which carry no project flag (git invokes them with a
+// fixed argument list it doesn't control). The project is resolved from
+// repoPath itself via ResolveProjectByPath, so each repo's git-triggered
+// syncs land in that repo's own project/collection — the one its `nav
+// index`/assistant hooks actually search — instead of a single "default"
+// bucket shared (and mixed together) across every repo with nav's git hooks
+// installed.
 func GitHookSync(repoPath string) (LazySyncResult, error) {
-	return LazySync(context.Background(), "default", repoPath, false)
+	project := ResolveProjectByPath(repoPath)
+	return LazySync(context.Background(), project, repoPath, false)
 }
 
 // HookSearch is the shared core of every AI-assistant prompt hook (Claude
-// Code, Qwen Code, Cursor, OpenCode): it syncs the index in-process, embeds
-// query, searches Qdrant under project's collection — across the current
-// branch's chain of ancestor branches (BranchChain), so symbols this branch
-// never re-embedded itself are still found via whichever ancestor last held
-// them — with no type/lang filtering, and returns the collapsed top-topK
-// hits as ContextResult entries ready for hook.FormatContextBlock. An empty
+// Code, Qwen Code, Cursor, OpenCode): it syncs the index in-process, then
+// searches the knowledge graph before it searches anything else. Any
+// identifier mentioned verbatim in query (e.g. a symbol name) is looked up
+// as an exact match against the current branch's SQLite graph via
+// GraphSearch — cheap, precise, and it carries real call-graph relationships
+// that a vector chunk alone doesn't. Only once that's exhausted does it fall
+// back to embedding query and searching Qdrant under project's collection —
+// across the current branch's chain of ancestor branches (BranchChain), so
+// symbols this branch never re-embedded itself are still found via whichever
+// ancestor last held them — to fill whatever's left of topK, skipping any
+// symbol the graph lookup already returned. Results are ContextResult
+// entries ready for hook.FormatContextBlock, graph hits first. An empty
 // query is a no-op.
 func HookSearch(ctx context.Context, project, path, query string, topK int, minScore float64) ([]hook.ContextResult, error) {
 	if query == "" {
@@ -50,18 +62,43 @@ func HookSearch(ctx context.Context, project, path, query string, topK int, minS
 
 	SyncBeforeSearch(ctx, project, path)
 
-	chain, err := BranchChain(path, CurrentBranch(path))
+	graphHits, err := GraphSearch(project, path, query, topK)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "nav: warn: graph search: %v\n", err)
+	}
+	if topK > 0 && len(graphHits) >= topK {
+		return graphHits, nil
+	}
+
+	chain, err := BranchChain(project, path, CurrentBranch(path))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "nav: warn: resolving branch chain: %v\n", err)
 	}
 
-	hits, err := Search(ctx, project, SearchOptions{Query: query, Threshold: minScore, Top: topK, BranchChain: chain})
+	semanticTop := topK
+	if topK > 0 {
+		semanticTop = topK - len(graphHits)
+	}
+	hits, err := Search(ctx, project, SearchOptions{Query: query, Threshold: minScore, Top: semanticTop, BranchChain: chain})
 	if err != nil {
+		if len(graphHits) > 0 {
+			return graphHits, nil // the graph already found something; don't drop it over a Qdrant error
+		}
 		return nil, err
 	}
 
-	ctxResults := make([]hook.ContextResult, 0, len(hits))
+	seen := make(map[[2]string]bool, len(graphHits))
+	for _, r := range graphHits {
+		seen[[2]string{r.File, r.Symbol}] = true
+	}
+
+	ctxResults := append([]hook.ContextResult(nil), graphHits...)
 	for _, r := range hits {
+		key := [2]string{r.Payload.FilePath, r.Payload.Symbol}
+		if seen[key] {
+			continue // already surfaced by the exact graph lookup
+		}
+		seen[key] = true
 		ctxResults = append(ctxResults, hook.ContextResult{
 			Score:   r.Score,
 			Symbol:  r.Payload.Symbol,

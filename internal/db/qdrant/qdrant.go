@@ -171,6 +171,24 @@ func (c *Client) CollectionExists(ctx context.Context, name string) (bool, error
 	return c.sdk.CollectionExists(ctx, name)
 }
 
+// CollectionPointsCount returns the approximate number of points in the
+// named collection, and false when the collection doesn't exist (not an
+// error — a project that's registered but never indexed simply has none).
+func (c *Client) CollectionPointsCount(ctx context.Context, name string) (int64, bool, error) {
+	exists, err := c.sdk.CollectionExists(ctx, name)
+	if err != nil {
+		return 0, false, err
+	}
+	if !exists {
+		return 0, false, nil
+	}
+	info, err := c.sdk.GetCollectionInfo(ctx, name)
+	if err != nil {
+		return 0, false, fmt.Errorf("getting collection info for %q: %w", name, err)
+	}
+	return int64(info.GetPointsCount()), true, nil
+}
+
 // EnsureCollection creates the collection with Cosine distance if it does not
 // already exist. It is a no-op when the collection is present.
 func (c *Client) EnsureCollection(ctx context.Context, name string, dimension int) error {
@@ -269,6 +287,43 @@ func (c *Client) DeleteByFilter(ctx context.Context, collection string, filters 
 		return fmt.Errorf("deleting from collection %q by filter: %w", collection, err)
 	}
 	return nil
+}
+
+// ExistingIDs returns the subset of ids (in nav's sha256 point-ID form, see
+// ID()) that already have a point in collection. It fetches no payload or
+// vectors — existence only — for `nav index --extend`, which uses this to
+// skip symbols already indexed rather than re-summarising and re-embedding
+// them.
+func (c *Client) ExistingIDs(ctx context.Context, collection string, ids []string) (map[string]bool, error) {
+	if len(ids) == 0 {
+		return map[string]bool{}, nil
+	}
+
+	pointIDs := make([]*sdk.PointId, len(ids))
+	uuidToID := make(map[string]string, len(ids))
+	for i, id := range ids {
+		pid := toPointID(id)
+		pointIDs[i] = pid
+		uuidToID[pid.GetUuid()] = id
+	}
+
+	points, err := c.sdk.Get(ctx, &sdk.GetPoints{
+		CollectionName: collection,
+		Ids:            pointIDs,
+		WithPayload:    sdk.NewWithPayload(false),
+		WithVectors:    sdk.NewWithVectors(false),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retrieving existing points from %q: %w", collection, err)
+	}
+
+	existing := make(map[string]bool, len(points))
+	for _, p := range points {
+		if id, ok := uuidToID[p.GetId().GetUuid()]; ok {
+			existing[id] = true
+		}
+	}
+	return existing, nil
 }
 
 // Search performs a vector similarity search and returns up to limit Hits whose

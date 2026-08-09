@@ -22,8 +22,8 @@ const (
 
 // GraphSummaryDigest opens the current branch's knowledge graph and returns
 // the ~1000-token digest: packages, entry points, top-called symbols.
-func GraphSummaryDigest(repoPath string) (string, error) {
-	sdb, err := db.Open(repoPath, CurrentBranch(repoPath))
+func GraphSummaryDigest(project, repoPath string) (string, error) {
+	sdb, err := openProjectDB(project, repoPath, CurrentBranch(repoPath))
 	if err != nil {
 		return "", fmt.Errorf("opening db: %w", err)
 	}
@@ -166,8 +166,8 @@ const (
 // this is deliberately exhaustive: the point is to hand an assistant the
 // codebase's full layout up front, straight from the graph, so it never
 // needs to re-discover it with find/ls/tree at the start of a session.
-func ProjectStructureDigest(repoPath string) (string, error) {
-	sdb, err := db.Open(repoPath, CurrentBranch(repoPath))
+func ProjectStructureDigest(project, repoPath string) (string, error) {
+	sdb, err := openProjectDB(project, repoPath, CurrentBranch(repoPath))
 	if err != nil {
 		return "", fmt.Errorf("opening db: %w", err)
 	}
@@ -278,12 +278,12 @@ func renderProjectStructure(sdb *db.DB) (string, error) {
 // assistant can navigate the codebase from the graph nav sync already
 // built, instead of re-parsing the project from scratch at the start of
 // every session.
-func SessionStartDigest(repoPath string) (string, error) {
-	summary, err := GraphSummaryDigest(repoPath)
+func SessionStartDigest(project, repoPath string) (string, error) {
+	summary, err := GraphSummaryDigest(project, repoPath)
 	if err != nil {
 		return "", err
 	}
-	structure, err := ProjectStructureDigest(repoPath)
+	structure, err := ProjectStructureDigest(project, repoPath)
 	if err != nil {
 		return "", err
 	}
@@ -293,8 +293,8 @@ func SessionStartDigest(repoPath string) (string, error) {
 // GraphCallers opens the current branch's knowledge graph and walks the
 // `calls` edges backward from every symbol node named symbolName, up to
 // depth hops. roots is empty when no symbol with that name exists.
-func GraphCallers(repoPath, symbolName string, depth int) (roots []db.Node, results []db.NodeDepth, err error) {
-	sdb, err := db.Open(repoPath, CurrentBranch(repoPath))
+func GraphCallers(project, repoPath, symbolName string, depth int) (roots []db.Node, results []db.NodeDepth, err error) {
+	sdb, err := openProjectDB(project, repoPath, CurrentBranch(repoPath))
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening db: %w", err)
 	}
@@ -320,8 +320,8 @@ func GraphCallers(repoPath, symbolName string, depth int) (roots []db.Node, resu
 // (a package directory or file path) to a node, then walks its `imports`
 // edges forward up to depth hops. rootID is "" when target could not be
 // resolved.
-func GraphDeps(repoPath, target string, depth int) (rootID string, node db.Node, results []db.NodeDepth, err error) {
-	sdb, err := db.Open(repoPath, CurrentBranch(repoPath))
+func GraphDeps(project, repoPath, target string, depth int) (rootID string, node db.Node, results []db.NodeDepth, err error) {
+	sdb, err := openProjectDB(project, repoPath, CurrentBranch(repoPath))
 	if err != nil {
 		return "", db.Node{}, nil, fmt.Errorf("opening db: %w", err)
 	}
@@ -351,8 +351,8 @@ type SymbolInfo struct {
 
 // GraphSymbol opens the current branch's knowledge graph and returns every
 // func/method/type/const node named name, together with its direct edges.
-func GraphSymbol(repoPath, name string) ([]SymbolInfo, error) {
-	sdb, err := db.Open(repoPath, CurrentBranch(repoPath))
+func GraphSymbol(project, repoPath, name string) ([]SymbolInfo, error) {
+	sdb, err := openProjectDB(project, repoPath, CurrentBranch(repoPath))
 	if err != nil {
 		return nil, fmt.Errorf("opening db: %w", err)
 	}

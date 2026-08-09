@@ -39,18 +39,19 @@ type SearchOptions struct {
 // recorded parent, a branch nav has no database for, or a cycle/depth cap
 // (maxParentChainDepth), so a symbol never re-embedded on branch is still
 // found via whichever ancestor last held it.
-func BranchChain(repoPath, branch string) ([]string, error) {
+func BranchChain(project, repoPath, branch string) ([]string, error) {
 	chain := []string{branch}
 	if branch == "" {
 		return chain, nil
 	}
+	ensureMigratedFromRepo(project, repoPath)
 	seen := map[string]bool{branch: true}
 	cur := branch
 	for i := 0; i < maxParentChainDepth; i++ {
-		if !db.Exists(repoPath, cur) {
+		if !db.Exists(project, cur) {
 			break
 		}
-		sdb, err := db.Open(repoPath, cur)
+		sdb, err := db.Open(project, cur)
 		if err != nil {
 			return chain, err
 		}

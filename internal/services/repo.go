@@ -27,9 +27,9 @@ func FetchAll(repoPath string) error {
 // CleanGoneBranches finds local branches whose upstream is gone, purges
 // their points from collection (or "nav_<project>" when collection is
 // empty), removes their per-branch local SQLite state (chunk manifest +
-// knowledge graph under repoPath/.nav), and deletes the branches. It returns
-// the branch names that were cleaned; a nil slice with a nil error means
-// there was nothing to do.
+// knowledge graph under ~/.nav/projects/<project>), and deletes the
+// branches. It returns the branch names that were cleaned; a nil slice with
+// a nil error means there was nothing to do.
 func CleanGoneBranches(ctx context.Context, project, repoPath, collection string) ([]string, error) {
 	gone, err := goneBranches(repoPath)
 	if err != nil {
@@ -73,7 +73,7 @@ func CleanGoneBranches(ctx context.Context, project, repoPath, collection string
 		}
 		fmt.Printf("Purged qdrant points for branch %q\n", branch)
 
-		if err := db.ResetBranch(repoPath, branch); err != nil {
+		if err := db.ResetBranch(project, branch); err != nil {
 			return nil, fmt.Errorf("removing local state for branch %q: %w", branch, err)
 		}
 		fmt.Printf("Removed local graph state for branch %q\n", branch)

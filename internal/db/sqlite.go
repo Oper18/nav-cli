@@ -1,12 +1,16 @@
 // This file holds the per-project SQLite state nav keeps under
-// <repoRoot>/.nav/: a manifest of embedded chunk hashes (for lazy
+// ~/.nav/projects/<project>/: a manifest of embedded chunk hashes (for lazy
 // re-embedding) and a knowledge graph of packages/files/symbols and their
-// relationships. The graph is not a project-wide fact — it reflects whatever
-// code the current branch happens to have, and that can differ meaningfully
-// from branch to branch — so each branch gets its own database file
-// (nav-<branch>.db), keyed by branch name. It uses modernc.org/sqlite (pure
-// Go, no cgo) and github.com/mattermost/morph to apply schema migrations
-// idempotently.
+// relationships. It lives under the user's home directory, keyed by project
+// name, rather than inside the repository being indexed — a repo can be
+// indexed under more than one project name (or from more than one clone),
+// and keeping nav's own state out of the working tree means there is never
+// anything for it to accidentally leak into `git status` or a commit. The
+// graph is not a project-wide fact — it reflects whatever code the current
+// branch happens to have, and that can differ meaningfully from branch to
+// branch — so each branch gets its own database file (nav-<branch>.db),
+// keyed by branch name. It uses modernc.org/sqlite (pure Go, no cgo) and
+// github.com/mattermost/morph to apply schema migrations idempotently.
 package db
 
 import (
@@ -41,25 +45,20 @@ type DB struct {
 	sql *sql.DB
 }
 
-// Dir returns the path to <repoRoot>/.nav, creating it if necessary. A
-// nested .gitignore ignoring everything under it is written on first
-// creation, so nav's own db/lock files never show up as changes in
-// `git status` — which would otherwise defeat the lazy sync's fast no-op
-// path and its own change detection — without touching the project's root
-// .gitignore.
-func Dir(repoRoot string) (string, error) {
-	dir := filepath.Join(repoRoot, ".nav")
+// Dir returns the path to ~/.nav/projects/<project>, creating it if
+// necessary. project is used as-is, the same convention as
+// config.ProjectDir — nav project names are short registry slugs (see
+// ResolveProject), not arbitrary user input, so no extra sanitizing is
+// applied here.
+func Dir(project string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	dir := filepath.Join(home, ".nav", "projects", project)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("creating %s: %w", dir, err)
 	}
-
-	gitignorePath := filepath.Join(dir, ".gitignore")
-	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
-		if err := os.WriteFile(gitignorePath, []byte("*\n"), 0644); err != nil {
-			return "", fmt.Errorf("writing %s: %w", gitignorePath, err)
-		}
-	}
-
 	return dir, nil
 }
 
@@ -88,35 +87,43 @@ func branchFileToken(branch string) string {
 	return b.String() + "-" + hash
 }
 
-// DBPath returns the path to <repoRoot>/.nav/nav-<branch>.db.
-func DBPath(repoRoot, branch string) string {
-	return filepath.Join(repoRoot, ".nav", "nav-"+branchFileToken(branch)+".db")
+// DBPath returns the path to ~/.nav/projects/<project>/nav-<branch>.db.
+func DBPath(project, branch string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	return filepath.Join(home, ".nav", "projects", project, "nav-"+branchFileToken(branch)+".db")
 }
 
-// Exists reports whether branch already has a database file under repoRoot —
+// Exists reports whether branch already has a database file for project —
 // i.e. whether nav has synced/indexed it before. It's used to restrict
 // parent-branch candidates to branches that actually have embeddings to
 // inherit from.
-func Exists(repoRoot, branch string) bool {
-	_, err := os.Stat(DBPath(repoRoot, branch))
+func Exists(project, branch string) bool {
+	_, err := os.Stat(DBPath(project, branch))
 	return err == nil
 }
 
-// LockPath returns the path to <repoRoot>/.nav/lock. The lock is shared
-// across every branch: it serialises concurrent sync invocations against the
-// same working tree (e.g. an overlapping git hook and prompt hook), not
-// concurrent syncs of the same branch's data.
-func LockPath(repoRoot string) string {
-	return filepath.Join(repoRoot, ".nav", "lock")
+// LockPath returns the path to ~/.nav/projects/<project>/lock. The lock is
+// shared across every branch: it serialises concurrent sync invocations
+// against the same project (e.g. an overlapping git hook and prompt hook),
+// not concurrent syncs of the same branch's data.
+func LockPath(project string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	return filepath.Join(home, ".nav", "projects", project, "lock")
 }
 
 // ResetBranch deletes branch's SQLite database and its WAL/SHM sidecar
-// files, so a subsequent Open(repoRoot, branch) recreates it from scratch
-// via migrations. It is a no-op when no database exists yet for branch. The
-// caller must not hold an open *DB for (repoRoot, branch) when calling
+// files, so a subsequent Open(project, branch) recreates it from scratch via
+// migrations. It is a no-op when no database exists yet for branch. The
+// caller must not hold an open *DB for (project, branch) when calling
 // ResetBranch.
-func ResetBranch(repoRoot, branch string) error {
-	base := DBPath(repoRoot, branch)
+func ResetBranch(project, branch string) error {
+	base := DBPath(project, branch)
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		path := base + suffix
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -127,11 +134,16 @@ func ResetBranch(repoRoot, branch string) error {
 }
 
 // ResetAll deletes every branch's SQLite database (and WAL/SHM sidecars)
-// under <repoRoot>/.nav, so a subsequent index run starts every branch from
-// a completely clean slate. It is a no-op when .nav does not exist yet. The
-// caller must not hold any open *DB under repoRoot when calling ResetAll.
-func ResetAll(repoRoot string) error {
-	dir := filepath.Join(repoRoot, ".nav")
+// under project's ~/.nav/projects/<project> directory, so a subsequent index
+// run starts every branch from a completely clean slate. It is a no-op when
+// that directory does not exist yet. The caller must not hold any open *DB
+// for project when calling ResetAll.
+func ResetAll(project string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	dir := filepath.Join(home, ".nav", "projects", project)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -151,15 +163,15 @@ func ResetAll(repoRoot string) error {
 	return nil
 }
 
-// Open creates <repoRoot>/.nav if needed, opens (or creates) branch's
-// nav-<branch>.db in WAL mode with a 5s busy timeout, and applies any
-// pending schema migrations.
-func Open(repoRoot, branch string) (*DB, error) {
-	if _, err := Dir(repoRoot); err != nil {
+// Open creates ~/.nav/projects/<project> if needed, opens (or creates)
+// branch's nav-<branch>.db in WAL mode with a 5s busy timeout, and applies
+// any pending schema migrations.
+func Open(project, branch string) (*DB, error) {
+	if _, err := Dir(project); err != nil {
 		return nil, err
 	}
 
-	path := DBPath(repoRoot, branch)
+	path := DBPath(project, branch)
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(wal)&_pragma=foreign_keys(1)",
 		path)
 	sqlDB, err := sql.Open("sqlite", dsn)

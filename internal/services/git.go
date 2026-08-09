@@ -156,3 +156,27 @@ func CommitsAhead(repoPath, base, ref string) (int, bool) {
 	}
 	return n, true
 }
+
+// IsGitRepo reports whether repoPath is inside a git working tree. Unlike
+// checking for a ".git" directory directly, this also works when repoPath is
+// a subdirectory of a repo rather than its root.
+func IsGitRepo(repoPath string) bool {
+	out, err := RunGitCmd(repoPath, "rev-parse", "--is-inside-work-tree")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(out) == "true"
+}
+
+// GitTrackedFiles returns every file git tracks under repoPath — i.e. `git
+// ls-files` — relative to repoPath. This is what "git-indexed" means: content
+// already staged/committed into git's index, which excludes anything caught
+// by .gitignore (vendor/, node_modules/, build output, ...) without nav
+// having to reimplement gitignore parsing itself.
+func GitTrackedFiles(repoPath string) ([]string, error) {
+	out, err := RunGitCmd(repoPath, "ls-files")
+	if err != nil {
+		return nil, err
+	}
+	return SplitLines(out), nil
+}

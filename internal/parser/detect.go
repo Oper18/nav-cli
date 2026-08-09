@@ -62,29 +62,42 @@ func ProgrammingLanguage(filePath string) config.ProgrammingLanguage {
 
 // ShouldSkip reports whether filePath matches any of the skip glob patterns.
 // Also returns true if the base name (without extension) ends in "_test" for Go files.
+//
+// A "dir/**" (or "**/dir/**") pattern matches dir as a path component
+// anywhere in filePath — mirroring .gitignore semantics — not just when dir
+// sits at the very start of filePath. Without this, a pattern like
+// "node_modules/**" only ever caught a top-level node_modules/, silently
+// letting nested ones (e.g. some-tool/node_modules/, vendored deep in a
+// subdirectory) through to be indexed in full.
 func ShouldSkip(filePath string, patterns []string) bool {
+	normalizedPath := filepath.ToSlash(filePath)
+	segments := strings.Split(normalizedPath, "/")
+	base := segments[len(segments)-1]
+
 	for _, pattern := range patterns {
-		// Handle the special case of "directory/**" pattern which should match
-		// all nested paths within that directory
-		if strings.HasSuffix(pattern, "/**") {
-			prefix := strings.TrimSuffix(pattern, "/**")
-			// Convert relative path separators consistently for comparison
-			normalizedPath := filepath.ToSlash(filePath)
-			normalizedPrefix := filepath.ToSlash(prefix)
-			
-			// Check if the file path starts with the directory prefix
-			if normalizedPath == normalizedPrefix || strings.HasPrefix(normalizedPath+"/", normalizedPrefix+"/") {
+		normalizedPattern := filepath.ToSlash(pattern)
+
+		switch {
+		case strings.HasSuffix(normalizedPattern, "/**"):
+			// "dir/**" or "**/dir/**" — dir as a path component anywhere.
+			dir := strings.TrimSuffix(normalizedPattern, "/**")
+			dir = strings.TrimPrefix(dir, "**/")
+			if dir != "" && pathContainsDir(segments[:len(segments)-1], dir) {
 				return true
 			}
-		} else {
-			// Standard glob matching
-			matched, err := filepath.Match(pattern, filePath)
-			if err == nil && matched {
+		case strings.HasPrefix(normalizedPattern, "**/"):
+			// "**/*.ext" — filename pattern matched at any depth, not just
+			// directly under the repo root.
+			namePattern := strings.TrimPrefix(normalizedPattern, "**/")
+			if matched, err := filepath.Match(namePattern, base); err == nil && matched {
 				return true
 			}
-			// Also match against just the base name.
-			matched, err = filepath.Match(pattern, filepath.Base(filePath))
-			if err == nil && matched {
+		default:
+			// Standard glob matching, against the full path and the base name.
+			if matched, err := filepath.Match(normalizedPattern, normalizedPath); err == nil && matched {
+				return true
+			}
+			if matched, err := filepath.Match(normalizedPattern, base); err == nil && matched {
 				return true
 			}
 		}
@@ -92,13 +105,36 @@ func ShouldSkip(filePath string, patterns []string) bool {
 
 	// For Go files, skip test files (base name without extension ends in "_test").
 	if DetectLanguage(filePath) == LangGo {
-		base := filepath.Base(filePath)
 		nameWithoutExt := strings.TrimSuffix(base, filepath.Ext(base))
 		if strings.HasSuffix(nameWithoutExt, "_test") {
 			return true
 		}
 	}
 
+	return false
+}
+
+// pathContainsDir reports whether dir (a possibly multi-segment,
+// slash-separated relative path) appears as a contiguous run of dirSegments
+// anywhere within dirSegments — i.e. filePath passes through dir at some
+// depth, not necessarily starting at the repo root.
+func pathContainsDir(dirSegments []string, dir string) bool {
+	needle := strings.Split(dir, "/")
+	if len(needle) > len(dirSegments) {
+		return false
+	}
+	for i := 0; i+len(needle) <= len(dirSegments); i++ {
+		match := true
+		for j, seg := range needle {
+			if dirSegments[i+j] != seg {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
 	return false
 }
 

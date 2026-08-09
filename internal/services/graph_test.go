@@ -36,7 +36,8 @@ func seedTinyGraph(t *testing.T, sdb *db.DB) {
 }
 
 func TestRenderGraphSummary(t *testing.T) {
-	sdb, err := db.Open(t.TempDir(), "main")
+	t.Setenv("HOME", t.TempDir())
+	sdb, err := db.Open("test", "main")
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -59,7 +60,8 @@ func TestRenderGraphSummary(t *testing.T) {
 }
 
 func TestGraphSummaryDigestCaching(t *testing.T) {
-	sdb, err := db.Open(t.TempDir(), "main")
+	t.Setenv("HOME", t.TempDir())
+	sdb, err := db.Open("test", "main")
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -98,7 +100,8 @@ func TestGraphSummaryDigestCaching(t *testing.T) {
 }
 
 func TestRenderProjectStructure(t *testing.T) {
-	sdb, err := db.Open(t.TempDir(), "main")
+	t.Setenv("HOME", t.TempDir())
+	sdb, err := db.Open("test", "main")
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -122,7 +125,8 @@ func TestRenderProjectStructure(t *testing.T) {
 }
 
 func TestProjectStructureDigestCaching(t *testing.T) {
-	sdb, err := db.Open(t.TempDir(), "main")
+	t.Setenv("HOME", t.TempDir())
+	sdb, err := db.Open("test", "main")
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -167,7 +171,8 @@ func TestProjectStructureDigestCaching(t *testing.T) {
 }
 
 func TestResolvePackageOrFile(t *testing.T) {
-	sdb, err := db.Open(t.TempDir(), "main")
+	t.Setenv("HOME", t.TempDir())
+	sdb, err := db.Open("test", "main")
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

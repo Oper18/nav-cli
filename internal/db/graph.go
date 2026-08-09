@@ -160,6 +160,30 @@ func NodesByName(exec Execer, name string) ([]Node, error) {
 	return scanNodes(rows)
 }
 
+// NodesByNames returns every node (any kind) whose name exactly matches one
+// of names — a batched form of NodesByName for looking up several candidate
+// identifiers (e.g. tokens pulled from a free-text query) in one round trip.
+func NodesByNames(exec Execer, names []string) ([]Node, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(names))
+	args := make([]interface{}, len(names))
+	for i, name := range names {
+		placeholders[i] = "?"
+		args[i] = name
+	}
+	rows, err := exec.Query(fmt.Sprintf(`
+		SELECT id, kind, name, COALESCE(file,''), COALESCE(line,0), COALESCE(summary,'')
+		FROM nodes WHERE name IN (%s) ORDER BY kind, file
+	`, strings.Join(placeholders, ",")), args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying nodes named %v: %w", names, err)
+	}
+	defer rows.Close()
+	return scanNodes(rows)
+}
+
 // NodesInFile returns every node whose file column is file — the file node
 // itself plus every symbol node defined in it (package nodes are never
 // file-scoped, so they are never returned here). Used to tear down a file's

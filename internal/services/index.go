@@ -43,13 +43,13 @@ func ProjectExists(ctx context.Context, collection string) (bool, error) {
 	return qdrantClient.CollectionExists(ctx, collection)
 }
 
-// ResetProject deletes collection from Qdrant and the project's local
-// SQLite state for every branch (chunk manifest + knowledge graph, under
-// repoPath/.nav), so a subsequent index run starts from a completely clean
-// slate. The Qdrant collection is shared across branches (points are
-// filtered by branch), so replacing a project wipes all of them, not just
-// the current branch.
-func ResetProject(ctx context.Context, repoPath, collection string) error {
+// ResetProject deletes collection from Qdrant and project's local SQLite
+// state for every branch (chunk manifest + knowledge graph, under
+// ~/.nav/projects/<project>), so a subsequent index run starts from a
+// completely clean slate. The Qdrant collection is shared across branches
+// (points are filtered by branch), so replacing a project wipes all of them,
+// not just the current branch.
+func ResetProject(ctx context.Context, project, collection string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
@@ -70,26 +70,32 @@ func ResetProject(ctx context.Context, repoPath, collection string) error {
 	if err := qdrantClient.DeleteCollection(ctx, collection); err != nil {
 		return fmt.Errorf("deleting qdrant collection %q: %w", collection, err)
 	}
-	if err := db.ResetAll(repoPath); err != nil {
+	if err := db.ResetAll(project); err != nil {
 		return fmt.Errorf("resetting local state: %w", err)
 	}
 	return nil
 }
 
 // IndexFiles indexes every file under repoPath into Qdrant. It is the shared
-// indexing logic used by both `nav index` and `nav sync`.
+// indexing logic used by both `nav index` and `nav sync`. extend, when true,
+// skips symbols that already have a point in Qdrant instead of
+// re-summarising/re-embedding them — see IndexSpecificFiles.
 func IndexFiles(
 	ctx context.Context,
 	project, repoPath, collectionFlag, langFilter string,
 	concurrency int,
 	dryRun bool,
 	ignoreDirs []string,
+	extend bool,
 ) error {
-	return IndexSpecificFiles(ctx, project, repoPath, collectionFlag, langFilter, concurrency, dryRun, nil, ignoreDirs)
+	return IndexSpecificFiles(ctx, project, repoPath, collectionFlag, langFilter, concurrency, dryRun, nil, ignoreDirs, extend)
 }
 
 // IndexSpecificFiles indexes only the given relative file paths (or all
-// files when specificFiles is nil).
+// files when specificFiles is nil). extend only applies to a full run
+// (specificFiles == nil) — an incremental sync call already knows exactly
+// which files changed, so there's nothing for "skip what's already indexed"
+// to add.
 func IndexSpecificFiles(
 	ctx context.Context,
 	project, repoPath, collectionFlag, langFilter string,
@@ -97,6 +103,7 @@ func IndexSpecificFiles(
 	dryRun bool,
 	specificFiles []string,
 	ignoreDirs []string,
+	extend bool,
 ) error {
 	// 1. Load config and credentials.
 	cfg, err := config.Load()
@@ -108,55 +115,31 @@ func IndexSpecificFiles(
 		return fmt.Errorf("loading credentials: %w", err)
 	}
 
-	// 2. Collect files to process.
+	// 2. Collect files to process. A full run (specificFiles == nil) prefers
+	// git's own tracked-file list over walking the filesystem: `git ls-files`
+	// already excludes everything .gitignore keeps out (vendor/, node_modules/,
+	// build output, ...) without nav reimplementing gitignore parsing, and it's
+	// immune to the class of bug where a skip pattern only catches a directory
+	// at the repo root and lets nested copies of it (e.g. a tool's own
+	// vendored node_modules/ several levels down) through untouched. Only
+	// repos without a git working tree fall back to the raw filesystem walk.
 	var relPaths []string
 
-	if specificFiles != nil {
+	switch {
+	case specificFiles != nil:
 		relPaths = specificFiles
-	} else {
-		if err := filepath.WalkDir(repoPath, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil // skip unreadable entries
-			}
-
-			// Convert path to relative path to check against ignore directories
-			rel, err := filepath.Rel(repoPath, path)
-			if err != nil {
-				return nil // skip entries that can't be relativized
-			}
-
-			// Handle directory skipping based on ignore dirs
-			if d.IsDir() {
-				// Clean relative path for comparison - this represents the current directory path relative to repo root
-				cleanRelPath := filepath.Clean(rel)
-
-				// Compare against ignore directories provided via the flag
-				for _, ignoreDir := range ignoreDirs {
-					if filepath.IsAbs(ignoreDir) {
-						// If ignoreDir is absolute, check if the current absolute path starts with it
-						if strings.HasPrefix(path, ignoreDir+string(filepath.Separator)) || path == ignoreDir {
-							return filepath.SkipDir
-						}
-					} else {
-						// If ignoreDir is relative, treat it as relative to the repo root
-						// cleanRelPath is the current directory path relative to the repo root
-						// For example: if we're looking at /repo/src/utils and ignoreDir="vendor",
-						// we check if "src/utils" matches the pattern "vendor"
-						normalizedIgnoreDir := filepath.Clean(ignoreDir)
-						if cleanRelPath == normalizedIgnoreDir ||
-							strings.HasPrefix(cleanRelPath, normalizedIgnoreDir+string(filepath.Separator)) {
-							return filepath.SkipDir
-						}
-					}
-				}
-				return nil // Don't add directories to relPaths, continue walking
-			}
-
-			relPaths = append(relPaths, rel)
-			return nil
-		}); err != nil {
+	case IsGitRepo(repoPath):
+		tracked, err := GitTrackedFiles(repoPath)
+		if err != nil {
+			return fmt.Errorf("listing git-tracked files: %w", err)
+		}
+		relPaths = filterIgnoredDirs(repoPath, tracked, ignoreDirs)
+	default:
+		walked, err := walkRepoFiles(repoPath, ignoreDirs)
+		if err != nil {
 			return fmt.Errorf("walking repository: %w", err)
 		}
+		relPaths = walked
 	}
 
 	// 3. Filter files.
@@ -192,6 +175,28 @@ func IndexSpecificFiles(
 			fileSet[rel] = true
 		}
 		allSymbols = append(allSymbols, syms...)
+	}
+
+	// 5b. --extend: drop symbols that already have a point in Qdrant, so this
+	// run only summarises/embeds/upserts what's genuinely missing — far
+	// cheaper than a full re-index when you just want to fill in the gap
+	// (e.g. after fixing an over-eager skip pattern, or resuming a partial
+	// run). Runs ahead of the dry-run print too, so --dry-run --extend
+	// previews only what would actually be added.
+	if extend && specificFiles == nil {
+		collection := collectionFlag
+		if collection == "" {
+			collection = "nav_" + project
+		}
+		filtered, skipped, err := filterExistingSymbols(ctx, cfg, creds, collection, branch, allSymbols)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warn: checking existing index for --extend: %v\n", err)
+		} else {
+			if skipped > 0 {
+				fmt.Fprintf(os.Stderr, "note: --extend skipping %d symbol(s) already in the index\n", skipped)
+			}
+			allSymbols = filtered
+		}
 	}
 
 	// 5. Dry-run: print a summary table and return.
@@ -285,6 +290,127 @@ func IndexSpecificFiles(
 	fmt.Printf("Indexed %d symbols from %d files\n", len(allSymbols), len(fileSet))
 
 	return nil
+}
+
+// filterExistingSymbols returns the subset of symbols whose first chunk
+// (chunk 0) doesn't already have a point in collection, plus how many were
+// dropped as already-present. A symbol is treated as a unit — its chunk-0 ID
+// standing in for the whole symbol regardless of how many chunks it splits
+// into — since re-indexing always re-derives every chunk of a symbol
+// together (see IndexSpecificFiles step 9b). If collection doesn't exist
+// yet, every symbol is new by definition and no Qdrant call is made.
+func filterExistingSymbols(ctx context.Context, cfg *config.Config, creds *config.Credentials, collection, branch string, symbols []parser.Symbol) ([]parser.Symbol, int, error) {
+	if len(symbols) == 0 {
+		return symbols, 0, nil
+	}
+	if err := EnsureLocalQdrant(cfg); err != nil {
+		return nil, 0, fmt.Errorf("ensuring local qdrant: %w", err)
+	}
+	qc, err := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
+	if err != nil {
+		return nil, 0, fmt.Errorf("creating qdrant client: %w", err)
+	}
+	defer qc.Close()
+
+	exists, err := qc.CollectionExists(ctx, collection)
+	if err != nil {
+		return nil, 0, fmt.Errorf("checking collection %q: %w", collection, err)
+	}
+	if !exists {
+		return symbols, 0, nil // nothing indexed yet — every symbol is new
+	}
+
+	ids := make([]string, len(symbols))
+	for i, sym := range symbols {
+		ids[i] = qdrant.ID(branch, sym.Symbol, 0)
+	}
+	existingIDs, err := qc.ExistingIDs(ctx, collection, ids)
+	if err != nil {
+		return nil, 0, fmt.Errorf("checking existing points in %q: %w", collection, err)
+	}
+
+	filtered := make([]parser.Symbol, 0, len(symbols))
+	for i, sym := range symbols {
+		if existingIDs[ids[i]] {
+			continue
+		}
+		filtered = append(filtered, sym)
+	}
+	return filtered, len(symbols) - len(filtered), nil
+}
+
+// walkRepoFiles lists every file under repoPath (relative paths), skipping
+// whole directory trees that match ignoreDirs as it goes. This is the
+// fallback used when repoPath isn't a git working tree — IndexSpecificFiles
+// prefers GitTrackedFiles when it is, since that also respects .gitignore.
+func walkRepoFiles(repoPath string, ignoreDirs []string) ([]string, error) {
+	var relPaths []string
+	err := filepath.WalkDir(repoPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+
+		rel, err := filepath.Rel(repoPath, path)
+		if err != nil {
+			return nil // skip entries that can't be relativized
+		}
+
+		if d.IsDir() {
+			if rel != "." && underIgnoredDir(repoPath, rel, ignoreDirs) {
+				return filepath.SkipDir
+			}
+			return nil // don't add directories themselves to relPaths
+		}
+
+		relPaths = append(relPaths, rel)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return relPaths, nil
+}
+
+// filterIgnoredDirs drops every path in relPaths that falls under one of
+// ignoreDirs, so `--ignore-dir` keeps working the same way whether the file
+// list came from walking the filesystem or from GitTrackedFiles.
+func filterIgnoredDirs(repoPath string, relPaths []string, ignoreDirs []string) []string {
+	if len(ignoreDirs) == 0 {
+		return relPaths
+	}
+	out := make([]string, 0, len(relPaths))
+	for _, rel := range relPaths {
+		if !underIgnoredDir(repoPath, rel, ignoreDirs) {
+			out = append(out, rel)
+		}
+	}
+	return out
+}
+
+// underIgnoredDir reports whether rel (a repoPath-relative file or directory
+// path) lies inside one of ignoreDirs. An absolute ignoreDir is compared
+// against rel's absolute form; a relative one is treated as relative to
+// repoPath, matching either exactly or as a leading path segment of rel.
+func underIgnoredDir(repoPath, rel string, ignoreDirs []string) bool {
+	for _, ignoreDir := range ignoreDirs {
+		if filepath.IsAbs(ignoreDir) {
+			if pathUnderDir(filepath.Join(repoPath, rel), ignoreDir) {
+				return true
+			}
+		} else if pathUnderDir(rel, ignoreDir) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathUnderDir reports whether rel is dir itself or lies inside it — i.e.
+// dir is rel or a leading path segment of rel, once both are cleaned and
+// slash-normalized.
+func pathUnderDir(rel, dir string) bool {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	dir = filepath.ToSlash(filepath.Clean(dir))
+	return rel == dir || strings.HasPrefix(rel, dir+"/")
 }
 
 // embedAndUpsertSymbols summarises, embeds, and upserts symbols into

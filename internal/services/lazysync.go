@@ -72,14 +72,16 @@ func LazySync(ctx context.Context, project, repoPath string, dryRun bool) (LazyS
 	var result LazySyncResult
 	branch := CurrentBranch(repoPath)
 
-	err := db.WithLock(repoPath, lazySyncLockWait, func() error {
-		sdb, err := db.Open(repoPath, branch)
+	ensureMigratedFromRepo(project, repoPath)
+
+	err := db.WithLock(project, lazySyncLockWait, func() error {
+		sdb, err := db.Open(project, branch)
 		if err != nil {
 			return fmt.Errorf("opening db: %w", err)
 		}
 		defer sdb.Close()
 
-		changed, deleted, parentBranch, err := detectChangedFiles(sdb, repoPath, branch)
+		changed, deleted, parentBranch, err := detectChangedFiles(sdb, project, repoPath, branch)
 		if err != nil {
 			return fmt.Errorf("detecting changed files: %w", err)
 		}
@@ -111,7 +113,7 @@ func LazySync(ctx context.Context, project, repoPath string, dryRun bool) (LazyS
 // since the last sync (covering commits made outside nav's own git hooks).
 // For non-git projects it falls back to an mtime walk against the
 // manifest's last-known files.
-func detectChangedFiles(sdb *db.DB, repoPath, branch string) (changed, deleted []string, parentBranch string, err error) {
+func detectChangedFiles(sdb *db.DB, project, repoPath, branch string) (changed, deleted []string, parentBranch string, err error) {
 	if _, statErr := os.Stat(filepath.Join(repoPath, ".git")); statErr != nil {
 		c, d, mErr := detectChangedFilesMtime(sdb, repoPath)
 		return c, d, "", mErr
@@ -148,7 +150,7 @@ func detectChangedFiles(sdb *db.DB, repoPath, branch string) (changed, deleted [
 		// treating every tracked file as "changed since last sync", so a
 		// project with no history to inherit from still gets fully indexed
 		// without requiring a separate `nav index` first.
-		if parent, mergeBase, found := detectParentBranch(repoPath, branch); found {
+		if parent, mergeBase, found := detectParentBranch(project, repoPath, branch); found {
 			raw, diffErr := RunGitCmd(repoPath, "diff", "--name-status", mergeBase, "HEAD")
 			if diffErr != nil {
 				fmt.Fprintf(os.Stderr, "nav: warn: diffing parent branch %s (%s..HEAD): %v\n", parent, mergeBase, diffErr)
@@ -207,7 +209,7 @@ func detectChangedFiles(sdb *db.DB, repoPath, branch string) (changed, deleted [
 // broken by preferring whichever candidate's own tip is fewest commits past
 // that merge-base — i.e. the more direct ancestor. A final lexical
 // tie-break keeps the choice deterministic.
-func detectParentBranch(repoPath, branch string) (parent, mergeBase string, found bool) {
+func detectParentBranch(project, repoPath, branch string) (parent, mergeBase string, found bool) {
 	branches, err := LocalBranches(repoPath)
 	if err != nil {
 		return "", "", false
@@ -219,7 +221,7 @@ func detectParentBranch(repoPath, branch string) (parent, mergeBase string, foun
 		if candidate == "" || candidate == branch {
 			continue
 		}
-		if !db.Exists(repoPath, candidate) {
+		if !db.Exists(project, candidate) {
 			continue
 		}
 		base, ok := MergeBase(repoPath, candidate, branch)

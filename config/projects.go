@@ -123,6 +123,25 @@ func FindProject(name string) (Project, bool) {
 	return Project{}, false
 }
 
+// FindProjectByPath returns the project whose registered Path exactly
+// matches path, if any. path should already be absolute (callers typically
+// pass the result of filepath.Abs). Unlike ResolveProject/AddProject, this
+// never registers anything — it's a pure lookup, used by entry points (git
+// hooks, `nav delete`) that must not create a new registration as a
+// side effect of merely trying to find one.
+func FindProjectByPath(path string) (Project, bool) {
+	projects, err := LoadProjects()
+	if err != nil {
+		return Project{}, false
+	}
+	for _, proj := range projects.Projects {
+		if proj.Path == path {
+			return proj, true
+		}
+	}
+	return Project{}, false
+}
+
 // AddProject registers (or updates) a project entry in projects.yaml. When an
 // entry with the same name already exists its path is refreshed only when the
 // supplied path is non-empty.
@@ -140,5 +159,28 @@ func AddProject(name, path string) error {
 		}
 	}
 	projects.Projects = append(projects.Projects, Project{Name: name, Path: path})
+	return SaveProjects(projects)
+}
+
+// RemoveProject deletes name's entry from projects.yaml, if present. It is a
+// no-op, not an error, when the project isn't registered.
+func RemoveProject(name string) error {
+	projects, err := LoadProjects()
+	if err != nil {
+		return err
+	}
+	out := make([]Project, 0, len(projects.Projects))
+	removed := false
+	for _, p := range projects.Projects {
+		if p.Name == name {
+			removed = true
+			continue
+		}
+		out = append(out, p)
+	}
+	if !removed {
+		return nil
+	}
+	projects.Projects = out
 	return SaveProjects(projects)
 }

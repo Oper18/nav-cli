@@ -6,9 +6,10 @@ import (
 )
 
 func TestOpenIsIdempotent(t *testing.T) {
-	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	project := t.Name()
 
-	db, err := Open(dir, "main")
+	db, err := Open(project, "main")
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
@@ -19,7 +20,7 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	db2, err := Open(dir, "main")
+	db2, err := Open(project, "main")
 	if err != nil {
 		t.Fatalf("second Open (should be a no-op migration): %v", err)
 	}
@@ -35,9 +36,10 @@ func TestOpenIsIdempotent(t *testing.T) {
 }
 
 func TestOpenIsolatesBranches(t *testing.T) {
-	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	project := t.Name()
 
-	main, err := Open(dir, "main")
+	main, err := Open(project, "main")
 	if err != nil {
 		t.Fatalf("Open(main): %v", err)
 	}
@@ -46,7 +48,7 @@ func TestOpenIsolatesBranches(t *testing.T) {
 	}
 	main.Close()
 
-	feature, err := Open(dir, "feature/foo")
+	feature, err := Open(project, "feature/foo")
 	if err != nil {
 		t.Fatalf("Open(feature/foo): %v", err)
 	}
@@ -58,15 +60,16 @@ func TestOpenIsolatesBranches(t *testing.T) {
 		t.Fatal("expected feature/foo's db to start empty, independent of main's")
 	}
 
-	if DBPath(dir, "main") == DBPath(dir, "feature/foo") {
+	if DBPath(project, "main") == DBPath(project, "feature/foo") {
 		t.Fatal("expected distinct branches to resolve to distinct db paths")
 	}
 }
 
 func TestResetBranchRemovesAndAllowsCleanReopen(t *testing.T) {
-	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	project := t.Name()
 
-	sdb, err := Open(dir, "main")
+	sdb, err := Open(project, "main")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -75,26 +78,26 @@ func TestResetBranchRemovesAndAllowsCleanReopen(t *testing.T) {
 	}
 	sdb.Close()
 
-	if _, err := os.Stat(DBPath(dir, "main")); err != nil {
+	if _, err := os.Stat(DBPath(project, "main")); err != nil {
 		t.Fatalf("expected db file to exist before reset: %v", err)
 	}
 
-	if err := ResetBranch(dir, "main"); err != nil {
+	if err := ResetBranch(project, "main"); err != nil {
 		t.Fatalf("ResetBranch: %v", err)
 	}
 
-	if _, err := os.Stat(DBPath(dir, "main")); !os.IsNotExist(err) {
+	if _, err := os.Stat(DBPath(project, "main")); !os.IsNotExist(err) {
 		t.Fatalf("expected db file to be gone after reset, stat err = %v", err)
 	}
 
 	// ResetBranch on an already-clean branch must be a no-op, not an error.
-	if err := ResetBranch(dir, "main"); err != nil {
+	if err := ResetBranch(project, "main"); err != nil {
 		t.Fatalf("ResetBranch (already clean): %v", err)
 	}
 
 	// Reopening after reset must recreate cleanly (fresh migrations, no
 	// leftover meta from before).
-	sdb2, err := Open(dir, "main")
+	sdb2, err := Open(project, "main")
 	if err != nil {
 		t.Fatalf("Open (after reset): %v", err)
 	}
@@ -105,9 +108,10 @@ func TestResetBranchRemovesAndAllowsCleanReopen(t *testing.T) {
 }
 
 func TestResetBranchLeavesOtherBranchesAlone(t *testing.T) {
-	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	project := t.Name()
 
-	main, err := Open(dir, "main")
+	main, err := Open(project, "main")
 	if err != nil {
 		t.Fatalf("Open(main): %v", err)
 	}
@@ -116,7 +120,7 @@ func TestResetBranchLeavesOtherBranchesAlone(t *testing.T) {
 	}
 	main.Close()
 
-	feature, err := Open(dir, "feature")
+	feature, err := Open(project, "feature")
 	if err != nil {
 		t.Fatalf("Open(feature): %v", err)
 	}
@@ -125,23 +129,24 @@ func TestResetBranchLeavesOtherBranchesAlone(t *testing.T) {
 	}
 	feature.Close()
 
-	if err := ResetBranch(dir, "feature"); err != nil {
+	if err := ResetBranch(project, "feature"); err != nil {
 		t.Fatalf("ResetBranch(feature): %v", err)
 	}
 
-	if _, err := os.Stat(DBPath(dir, "main")); err != nil {
+	if _, err := os.Stat(DBPath(project, "main")); err != nil {
 		t.Fatalf("expected main's db to survive resetting feature: %v", err)
 	}
-	if _, err := os.Stat(DBPath(dir, "feature")); !os.IsNotExist(err) {
+	if _, err := os.Stat(DBPath(project, "feature")); !os.IsNotExist(err) {
 		t.Fatalf("expected feature's db to be gone, stat err = %v", err)
 	}
 }
 
 func TestResetAllRemovesEveryBranch(t *testing.T) {
-	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	project := t.Name()
 
 	for _, branch := range []string{"main", "feature/foo", "release-1.0"} {
-		sdb, err := Open(dir, branch)
+		sdb, err := Open(project, branch)
 		if err != nil {
 			t.Fatalf("Open(%s): %v", branch, err)
 		}
@@ -151,25 +156,26 @@ func TestResetAllRemovesEveryBranch(t *testing.T) {
 		sdb.Close()
 	}
 
-	if err := ResetAll(dir); err != nil {
+	if err := ResetAll(project); err != nil {
 		t.Fatalf("ResetAll: %v", err)
 	}
 
 	for _, branch := range []string{"main", "feature/foo", "release-1.0"} {
-		if _, err := os.Stat(DBPath(dir, branch)); !os.IsNotExist(err) {
+		if _, err := os.Stat(DBPath(project, branch)); !os.IsNotExist(err) {
 			t.Fatalf("expected %s's db to be gone after ResetAll, stat err = %v", branch, err)
 		}
 	}
 
-	// ResetAll against a .nav directory that was never created must be a
-	// no-op, not an error.
-	if err := ResetAll(t.TempDir()); err != nil {
-		t.Fatalf("ResetAll (no .nav yet): %v", err)
+	// ResetAll against a project that was never created must be a no-op, not
+	// an error.
+	if err := ResetAll("never-indexed-project"); err != nil {
+		t.Fatalf("ResetAll (no project dir yet): %v", err)
 	}
 }
 
 func TestChunkDirtyDetection(t *testing.T) {
-	db, err := Open(t.TempDir(), "main")
+	t.Setenv("HOME", t.TempDir())
+	db, err := Open(t.Name(), "main")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -214,7 +220,8 @@ func TestChunkDirtyDetection(t *testing.T) {
 }
 
 func TestGraphWalk(t *testing.T) {
-	db, err := Open(t.TempDir(), "main")
+	t.Setenv("HOME", t.TempDir())
+	db, err := Open(t.Name(), "main")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

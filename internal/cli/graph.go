@@ -65,11 +65,11 @@ func init() {
 }
 
 func runGraphSummary(cmd *cobra.Command, args []string) error {
-	_, path, err := services.ResolveProject(args, graphSummaryPath)
+	project, path, err := services.ResolveProject(args, graphSummaryPath)
 	if err != nil {
 		return err
 	}
-	digest, err := services.GraphSummaryDigest(path)
+	digest, err := services.GraphSummaryDigest(project, path)
 	if err != nil {
 		return err
 	}
@@ -79,12 +79,12 @@ func runGraphSummary(cmd *cobra.Command, args []string) error {
 
 func runGraphCallers(cmd *cobra.Command, args []string) error {
 	symbolName := args[0]
-	_, path, err := services.ResolveProject(args[1:], graphCallersPath)
+	project, path, err := services.ResolveProject(args[1:], graphCallersPath)
 	if err != nil {
 		return err
 	}
 
-	roots, results, err := services.GraphCallers(path, symbolName, graphCallersDepth)
+	roots, results, err := services.GraphCallers(project, path, symbolName, graphCallersDepth)
 	if err != nil {
 		return err
 	}
@@ -108,12 +108,12 @@ func runGraphCallers(cmd *cobra.Command, args []string) error {
 
 func runGraphDeps(cmd *cobra.Command, args []string) error {
 	target := args[0]
-	_, path, err := services.ResolveProject(args[1:], graphDepsPath)
+	project, path, err := services.ResolveProject(args[1:], graphDepsPath)
 	if err != nil {
 		return err
 	}
 
-	rootID, node, results, err := services.GraphDeps(path, target, graphDepsDepth)
+	rootID, node, results, err := services.GraphDeps(project, path, target, graphDepsDepth)
 	if err != nil {
 		return err
 	}
@@ -145,12 +145,12 @@ func runGraphDeps(cmd *cobra.Command, args []string) error {
 
 func runGraphSymbol(cmd *cobra.Command, args []string) error {
 	name := args[0]
-	_, path, err := services.ResolveProject(args[1:], graphSymbolPath)
+	project, path, err := services.ResolveProject(args[1:], graphSymbolPath)
 	if err != nil {
 		return err
 	}
 
-	infos, err := services.GraphSymbol(path, name)
+	infos, err := services.GraphSymbol(project, path, name)
 	if err != nil {
 		return err
 	}

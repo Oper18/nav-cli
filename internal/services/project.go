@@ -62,3 +62,31 @@ func ResolveProject(args []string, pathFlag string) (name, path string, err erro
 	}
 	return name, path, nil
 }
+
+// ResolveProjectByPath finds the project registered for repoPath — an exact
+// match against ~/.nav-cli/projects.yaml — for entry points that only have a
+// repository path and no project name to go on, chiefly nav's git hooks:
+// git invokes them with no way to pass a project flag, so they used to sync
+// every repo into a single shared "default" project/collection, mixing
+// unrelated repos' embeddings together and never actually updating the
+// collection a repo's own `nav index`/assistant hooks search. Falls back to
+// the basename of repoPath (and registers it, exactly like ResolveProject
+// does for an explicit invocation) when no registered project matches, so a
+// repo not yet indexed by name still gets a stable, repo-specific project
+// instead of the shared bucket.
+func ResolveProjectByPath(repoPath string) string {
+	abs, err := filepath.Abs(repoPath)
+	if err != nil {
+		abs = repoPath
+	}
+
+	if proj, ok := config.FindProjectByPath(abs); ok {
+		return proj.Name
+	}
+
+	name := filepath.Base(abs)
+	if err := config.AddProject(name, abs); err != nil {
+		fmt.Fprintf(os.Stderr, "nav: warn: registering project %q: %v\n", name, err)
+	}
+	return name
+}

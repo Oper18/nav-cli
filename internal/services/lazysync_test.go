@@ -14,7 +14,8 @@ import (
 )
 
 func TestDiffSymbols(t *testing.T) {
-	sdb, err := db.Open(t.TempDir(), "main")
+	t.Setenv("HOME", t.TempDir())
+	sdb, err := db.Open("test", "main")
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -99,6 +100,8 @@ func TestAlreadySyncedFileIsNotFlaggedAgain(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+	t.Setenv("HOME", t.TempDir())
+	const project = "test"
 	repo := t.TempDir()
 	run := func(args ...string) {
 		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
@@ -117,7 +120,7 @@ func TestAlreadySyncedFileIsNotFlaggedAgain(t *testing.T) {
 	run("add", "a.go")
 	run("commit", "-q", "-m", "init")
 
-	sdb, err := db.Open(repo, "main")
+	sdb, err := db.Open(project, "main")
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -138,7 +141,7 @@ func TestAlreadySyncedFileIsNotFlaggedAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, deleted, _, err := detectChangedFiles(sdb, repo, "main")
+	changed, deleted, _, err := detectChangedFiles(sdb, project, repo, "main")
 	if err != nil {
 		t.Fatalf("detectChangedFiles: %v", err)
 	}
@@ -204,6 +207,8 @@ func TestGitStatusAndChangeDetection(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+	t.Setenv("HOME", t.TempDir())
+	const project = "test"
 	repo := t.TempDir()
 	run := func(args ...string) {
 		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
@@ -221,7 +226,7 @@ func TestGitStatusAndChangeDetection(t *testing.T) {
 	run("add", "a.go")
 	run("commit", "-q", "-m", "init")
 
-	sdb, err := db.Open(repo, "main")
+	sdb, err := db.Open(project, "main")
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -230,7 +235,7 @@ func TestGitStatusAndChangeDetection(t *testing.T) {
 	// Bootstrap case: no last_sync_head recorded yet, so every tracked file
 	// counts as "changed since last sync" — otherwise a brand new project
 	// with a clean working tree would never get indexed at all.
-	changed, deleted, _, err := detectChangedFiles(sdb, repo, "main")
+	changed, deleted, _, err := detectChangedFiles(sdb, project, repo, "main")
 	if err != nil {
 		t.Fatalf("detectChangedFiles: %v", err)
 	}
@@ -259,7 +264,7 @@ func TestGitStatusAndChangeDetection(t *testing.T) {
 	run("add", "b.go")
 	run("commit", "-q", "-m", "add b")
 
-	changed, deleted, _, err = detectChangedFiles(sdb, repo, "main")
+	changed, deleted, _, err = detectChangedFiles(sdb, project, repo, "main")
 	if err != nil {
 		t.Fatalf("detectChangedFiles after commit: %v", err)
 	}
@@ -283,7 +288,7 @@ func TestGitStatusAndChangeDetection(t *testing.T) {
 	if err := sdb.SetMeta(metaLastSyncHead, HeadCommit(repo)); err != nil {
 		t.Fatal(err)
 	}
-	changed, _, _, err = detectChangedFiles(sdb, repo, "main")
+	changed, _, _, err = detectChangedFiles(sdb, project, repo, "main")
 	if err != nil {
 		t.Fatalf("detectChangedFiles after working-tree edit: %v", err)
 	}
@@ -311,6 +316,7 @@ func setupBranchTopology(t *testing.T) (repo string, run func(args ...string) st
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+	t.Setenv("HOME", t.TempDir())
 	repo = t.TempDir()
 	run = func(args ...string) string {
 		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
@@ -349,7 +355,7 @@ func setupBranchTopology(t *testing.T) (repo string, run func(args ...string) st
 	run("commit", "-q", "-m", "c3")
 
 	for _, b := range []string{"main", "dev"} {
-		sdb, err := db.Open(repo, b)
+		sdb, err := db.Open(branchTopologyProject, b)
 		if err != nil {
 			t.Fatalf("db.Open(%s): %v", b, err)
 		}
@@ -359,6 +365,12 @@ func setupBranchTopology(t *testing.T) (repo string, run func(args ...string) st
 	return repo, run
 }
 
+// branchTopologyProject is the project name setupBranchTopology seeds
+// "main" and "dev" databases under; every test built on it must open
+// "feature" (and run detectParentBranch/detectChangedFiles) against this
+// same project so db.Exists finds those seeded branches.
+const branchTopologyProject = "test"
+
 // TestDetectParentBranchPrefersClosestSharedHistory guards the tie-break: when
 // two candidate branches share the exact same merge-base commit (because one
 // of them later merged the other), the candidate whose own tip *is* that
@@ -367,7 +379,7 @@ func setupBranchTopology(t *testing.T) (repo string, run func(args ...string) st
 func TestDetectParentBranchPrefersClosestSharedHistory(t *testing.T) {
 	repo, run := setupBranchTopology(t)
 
-	parent, base, found := detectParentBranch(repo, "feature")
+	parent, base, found := detectParentBranch(branchTopologyProject, repo, "feature")
 	if !found {
 		t.Fatal("expected a parent branch to be found")
 	}
@@ -386,13 +398,13 @@ func TestDetectParentBranchPrefersClosestSharedHistory(t *testing.T) {
 func TestBootstrapDiffsOnlyAgainstParentBranch(t *testing.T) {
 	repo, _ := setupBranchTopology(t)
 
-	sdb, err := db.Open(repo, "feature")
+	sdb, err := db.Open(branchTopologyProject, "feature")
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer sdb.Close()
 
-	changed, deleted, parentBranch, err := detectChangedFiles(sdb, repo, "feature")
+	changed, deleted, parentBranch, err := detectChangedFiles(sdb, branchTopologyProject, repo, "feature")
 	if err != nil {
 		t.Fatalf("detectChangedFiles: %v", err)
 	}
@@ -415,13 +427,13 @@ func TestBootstrapDiffsOnlyAgainstParentBranch(t *testing.T) {
 func TestSyncFilesPersistsParentBranchMeta(t *testing.T) {
 	repo, _ := setupBranchTopology(t)
 
-	sdb, err := db.Open(repo, "feature")
+	sdb, err := db.Open(branchTopologyProject, "feature")
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer sdb.Close()
 
-	if _, err := syncFiles(context.Background(), sdb, "testproj", repo, "feature", nil, nil, "dev", false); err != nil {
+	if _, err := syncFiles(context.Background(), sdb, branchTopologyProject, repo, "feature", nil, nil, "dev", false); err != nil {
 		t.Fatalf("syncFiles: %v", err)
 	}
 
@@ -442,12 +454,13 @@ func TestSyncFilesPersistsParentBranchMeta(t *testing.T) {
 // DeleteOutgoingEdges (the full-rebuild path's teardown call) would remove,
 // and asserts it survives.
 func TestUpdateFileGraphOnlyTouchesDirtySymbols(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	repo := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repo, "a.go"), []byte("package a\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	sdb, err := db.Open(repo, "main")
+	sdb, err := db.Open("test", "main")
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

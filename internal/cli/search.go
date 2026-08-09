@@ -67,7 +67,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		// An explicit --branch means exactly that branch, not its ancestor chain.
 		opts.Branch = searchBranch
 	} else {
-		chain, err := services.BranchChain(repoPath, services.CurrentBranch(repoPath))
+		chain, err := services.BranchChain(project, repoPath, services.CurrentBranch(repoPath))
 		if err != nil {
 			return fmt.Errorf("resolving branch chain: %w", err)
 		}

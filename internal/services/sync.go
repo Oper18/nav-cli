@@ -49,7 +49,7 @@ func SyncSince(ctx context.Context, project, repoPath, since string, dryRun bool
 		return result, nil
 	}
 
-	if err := IndexSpecificFiles(ctx, project, repoPath, "", "", 4, false, changedFiles, []string{}); err != nil {
+	if err := IndexSpecificFiles(ctx, project, repoPath, "", "", 4, false, changedFiles, []string{}, false); err != nil {
 		return result, err
 	}
 	return result, nil

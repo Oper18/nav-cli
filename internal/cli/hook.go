@@ -392,7 +392,7 @@ func readQueryStdin(cmd *cobra.Command) (string, error) {
 // syncing here would add hook-startup latency for a summary that's meant to
 // be a cheap, already-cached read.
 func runHookRunClaudeSessionStart(project, path string) error {
-	digest, err := services.SessionStartDigest(path)
+	digest, err := services.SessionStartDigest(project, path)
 	if err != nil {
 		return fmt.Errorf("building session start context: %w", err)
 	}
@@ -410,7 +410,7 @@ func runHookRunClaudeSessionStart(project, path string) error {
 // is the only event whose response schema supports it, so unlike Claude the
 // digest is delivered once per session rather than refreshed per prompt.
 func runHookRunCursorSessionStart(project, path string) error {
-	digest, err := services.SessionStartDigest(path)
+	digest, err := services.SessionStartDigest(project, path)
 	if err != nil {
 		return fmt.Errorf("building session start context: %w", err)
 	}
