@@ -49,6 +49,16 @@ type EmbeddingConfig struct {
 	RequestTimeout int `mapstructure:"request_timeout" yaml:"request_timeout"`
 }
 
+// SearchConfig holds settings that control the `nav search` command.
+type SearchConfig struct {
+	// Threshold is the default minimum cosine-similarity score a hit must
+	// meet to be returned, used whenever `nav search` is run without an
+	// explicit --threshold flag. Tune this to the embedding model in use —
+	// different models produce different score distributions for the same
+	// query/document pair.
+	Threshold float64 `mapstructure:"threshold" yaml:"threshold"`
+}
+
 // IndexingConfig holds settings that control the indexing pipeline.
 type IndexingConfig struct {
 	Concurrency  int      `mapstructure:"concurrency"   yaml:"concurrency"`
@@ -78,6 +88,7 @@ type Config struct {
 	Qdrant    QdrantConfig    `mapstructure:"qdrant"     yaml:"qdrant"`
 	LLM       LLMConfig       `mapstructure:"llm"        yaml:"llm"`
 	Embedding EmbeddingConfig `mapstructure:"embedding"  yaml:"embedding"`
+	Search    SearchConfig    `mapstructure:"search"     yaml:"search"`
 	Indexing  IndexingConfig  `mapstructure:"indexing"   yaml:"indexing"`
 	Hooks     HooksConfig     `mapstructure:"hooks"      yaml:"hooks"`
 }
@@ -131,6 +142,8 @@ func Load() (*Config, error) {
 	v.SetDefault("embedding.query_instruction", "Given a code search query, retrieve relevant code symbols that satisfy it")
 	v.SetDefault("embedding.max_tokens", 8192)
 	v.SetDefault("embedding.request_timeout", 120)
+
+	v.SetDefault("search.threshold", 0.4)
 
 	v.SetDefault("indexing.concurrency", 4)
 	v.SetDefault("indexing.skip_patterns", []string{
@@ -289,6 +302,9 @@ func WriteDefault() error {
 			QueryInstruction: "Given a code search query, retrieve relevant code symbols that satisfy it",
 			MaxTokens:        8192,
 			RequestTimeout:   120,
+		},
+		Search: SearchConfig{
+			Threshold: 0.4,
 		},
 		Indexing: IndexingConfig{
 			Concurrency: 4,

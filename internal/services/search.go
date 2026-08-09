@@ -27,8 +27,11 @@ type SearchOptions struct {
 	BranchChain []string
 	Type        string // filter by symbol type; "" means no filter
 	Lang        string // filter by language; "" means no filter
-	Threshold   float64
-	Collection  string // Qdrant collection name; "" defaults to "nav_<project>"
+	// Threshold is the minimum similarity score a hit must meet. A negative
+	// value (the CLI's unset default) means "use search.threshold from
+	// config.yaml"; 0 is a valid explicit choice meaning no filtering.
+	Threshold  float64
+	Collection string // Qdrant collection name; "" defaults to "nav_<project>"
 	Top         int
 }
 
@@ -95,6 +98,11 @@ func Search(ctx context.Context, project string, opts SearchOptions) ([]qdrant.H
 	}
 	queryVec := vecs[0]
 
+	threshold := opts.Threshold
+	if threshold < 0 {
+		threshold = cfg.Search.Threshold
+	}
+
 	filters := map[string]string{}
 	var branchIn []string
 	switch {
@@ -124,7 +132,7 @@ func Search(ctx context.Context, project string, opts SearchOptions) ([]qdrant.H
 	}
 	defer qdrantClient.Close()
 
-	results, err := qdrantClient.Search(ctx, collection, queryVec, overFetch(opts.Top, len(branchIn)), opts.Threshold, filters, branchIn)
+	results, err := qdrantClient.Search(ctx, collection, queryVec, overFetch(opts.Top, len(branchIn)), threshold, filters, branchIn)
 	if err != nil {
 		return nil, fmt.Errorf("searching: %w", err)
 	}

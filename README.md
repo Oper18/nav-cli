@@ -213,6 +213,9 @@ embedding:
   dimension: 1024                # must match the Qdrant collection
   request_timeout: 120           # timeout (in seconds) for embedding requests (useful for large projects)
 
+search:
+  threshold: 0.4                 # default --threshold for `nav search`; tune to your embedding model's score range
+
 indexing:
   concurrency: 4                 # parallel symbol processing goroutines
   skip_patterns:                 # glob patterns relative to repo root
@@ -450,7 +453,7 @@ nav search --project <name> <query> [flags]
 | `--lang` | all | filter by language |
 | `--layer` | all | filter by layer: `service`, `controller`, … |
 | `--json` | false | output results as JSON instead of human-readable text |
-| `--threshold` | 0.70 | minimum cosine similarity score |
+| `--threshold` | `search.threshold` in config.yaml (0.4) | minimum cosine similarity score |
 
 ```bash
 nav search --project mokosh "password hashing"

@@ -43,7 +43,7 @@ func init() {
 	searchCmd.Flags().StringVar(&searchType, "type", "", "Filter by symbol type (function, method, class, ...)")
 	searchCmd.Flags().StringVar(&searchLang, "lang", "", "Filter by language")
 	searchCmd.Flags().BoolVar(&searchJSON, "json", false, "Output results as JSON")
-	searchCmd.Flags().Float64Var(&searchThreshold, "threshold", 0.70, "Minimum similarity score")
+	searchCmd.Flags().Float64Var(&searchThreshold, "threshold", -1, "Minimum similarity score (default: search.threshold from config.yaml, 0.4)")
 	searchCmd.Flags().StringVar(&searchCollection, "collection", "", "Qdrant collection name (default: nav_<project>)")
 }
 
