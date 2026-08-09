@@ -12,13 +12,28 @@ import (
 // command.
 //
 // Both are optional. The project name comes from the first positional
-// argument when one is given; otherwise it defaults to the basename of the
-// current working directory. The repository path is resolved in priority
+// argument when one is given. The repository path is resolved in priority
 // order:
 //
 //  1. the --path flag (pathFlag) when non-empty,
-//  2. the path registered for the project in ~/.nav-cli/projects.yaml,
+//  2. (only when a project name was given) the path registered for that
+//     project in ~/.nav-cli/projects.yaml,
 //  3. the current working directory.
+//
+// When no project name is given, one is derived from the resolved path
+// instead of assuming it: the path is looked up in projects.yaml
+// (config.FindProjectByPath) and, when a project is already registered for
+// it, that project's name is used — even when the name doesn't match any
+// part of the path, e.g. a project indexed as `nav index myproj --path
+// ~/work/some-repo`. This mirrors ResolveProjectByPath (used by nav's git
+// hooks) and matters because a project name is never required to match the
+// directory basename: `nav index` accepts any name for any --path. Without
+// this lookup, running a later command from inside that repo with no
+// explicit name (e.g. `nav search "query"` from ~/work/some-repo) would
+// resolve to a *different* project named "some-repo" — auto-registering a
+// spurious duplicate entry instead of finding "myproj" and its existing
+// index. Only when no project is registered for the path at all does the
+// name fall back to the directory's basename, as before.
 //
 // The returned path is always absolute. The resolved (name, path) pair is
 // persisted to projects.yaml so subsequent invocations can refer to the
@@ -33,14 +48,13 @@ func ResolveProject(args []string, pathFlag string) (name, path string, err erro
 		return "", "", fmt.Errorf("resolving current directory: %w", err)
 	}
 
-	// Project name: positional argument, or the current directory's basename.
-	if len(args) > 0 && args[0] != "" {
+	explicitName := len(args) > 0 && args[0] != ""
+	if explicitName {
 		name = args[0]
-	} else {
-		name = filepath.Base(cwdAbs)
 	}
 
-	// Repository path: --path flag, then registered path, then current directory.
+	// Repository path: --path flag, then (with an explicit name) that
+	// project's registered path, then current directory.
 	switch {
 	case pathFlag != "":
 		abs, err := filepath.Abs(pathFlag)
@@ -48,11 +62,24 @@ func ResolveProject(args []string, pathFlag string) (name, path string, err erro
 			return "", "", fmt.Errorf("resolving --path %q: %w", pathFlag, err)
 		}
 		path = abs
-	default:
+	case explicitName:
 		if proj, ok := config.FindProject(name); ok && proj.Path != "" {
 			path = proj.Path
 		} else {
 			path = cwdAbs
+		}
+	default:
+		path = cwdAbs
+	}
+
+	// Project name: positional argument, or whatever project is already
+	// registered for the resolved path, or the current directory's
+	// basename as a last resort.
+	if !explicitName {
+		if proj, ok := config.FindProjectByPath(path); ok {
+			name = proj.Name
+		} else {
+			name = filepath.Base(cwdAbs)
 		}
 	}
 
