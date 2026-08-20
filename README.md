@@ -235,6 +235,7 @@ indexing:
 
 hooks:
   git_skip_env: NAV_SKIP         # env var checked by the pre-commit hook
+  prompt_timeout_sec: 60         # UserPromptSubmit hook timeout, shared by every code agent
   claude_top_k: 5                # how many results to inject into Claude context
 ```
 
@@ -951,10 +952,22 @@ The `<nav-context>` block is prepended to the conversation turn so Claude Code s
 ```yaml
 # ~/.nav-cli/config.yaml
 hooks:
-  claude_top_k: 5           # number of results injected
-  claude_min_score: 0.72    # minimum similarity score; lower results are dropped
-  claude_max_tokens: 4000   # hard cap on total injected text length
+  claude_top_k: 5             # number of results injected
+  claude_min_score: 0.72      # minimum similarity score; lower results are dropped
+  claude_max_tokens: 4000     # hard cap on total injected text length
+  prompt_timeout_sec: 60      # UserPromptSubmit hook timeout — one value shared by every agent
 ```
+
+`prompt_timeout_sec` bounds the `UserPromptSubmit` hook itself (Claude
+Code's and Qwen Code's own default is 30s), not the search — a lazy sync on
+a large diff can outrun a short timeout, in which case the agent discards
+the hook's output and prints something like "UserPromptSubmit hook timed
+out after Ns". It's one setting for every code agent nav hooks into rather
+than a value per assistant, since it's bounding the same lazy-sync-then-embed
+work everywhere. If you hit that error, raise `prompt_timeout_sec` and
+re-run `nav hook install --type claude` (or `--type qwen`, or `--global` for
+the `~/.claude`/`~/.qwen` settings file): install re-syncs the `"timeout"`
+field on an already-installed hook, so it doesn't just no-op.
 
 ### Uninstallation
 

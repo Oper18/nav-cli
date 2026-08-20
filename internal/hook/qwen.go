@@ -17,14 +17,19 @@ type QwenHookEntry struct {
 type QwenHook struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
+	Timeout int    `json:"timeout,omitempty"`
 }
 
 // InstallQwen writes the nav hook into Qwen Code settings.json.
 // settingsPath is the full path to the settings.json file.
-// project is the nav project name. topK is how many results to inject. It
-// returns installed=false when the hook was already present, leaving
-// settings.json untouched in that case.
-func InstallQwen(settingsPath, project string, topK int) (installed bool, err error) {
+// project is the nav project name. topK is how many results to inject.
+// timeoutSec bounds the hook (see InstallClaude's timeoutSec doc — same
+// rationale applies here); <= 0 omits the field and Qwen Code's own default
+// applies. Re-running InstallQwen when the hook is already present does not
+// re-add it, but does sync its "timeout" field to the current timeoutSec —
+// see InstallClaude's doc for why. installed reports whether settings.json
+// was modified at all (a fresh add or a timeout sync).
+func InstallQwen(settingsPath, project string, topK, timeoutSec int) (installed bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
 		return false, fmt.Errorf("creating settings directory: %w", err)
 	}
@@ -50,7 +55,7 @@ func InstallQwen(settingsPath, project string, topK int) (installed bool, err er
 		project, topK,
 	)
 
-	// Check if already installed.
+	// Check if already installed; if so, just sync its timeout field.
 	existing, _ := hooks["UserPromptSubmit"].([]interface{})
 	for _, raw := range existing {
 		entry, ok := raw.(map[string]interface{})
@@ -58,19 +63,27 @@ func InstallQwen(settingsPath, project string, topK int) (installed bool, err er
 			continue
 		}
 		if entryContainsNavQwen(entry) {
-			return false, nil // already installed
+			if !syncHookTimeout(entry, "--type qwen", timeoutSec) {
+				return false, nil // already installed, nothing to sync
+			}
+			if err := writeSettingsJSON(settingsPath, settings); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
 	}
 
 	// Build the new entry as a plain map so it round-trips cleanly.
+	hookAction := map[string]interface{}{
+		"type":    "command",
+		"command": navCommand,
+	}
+	if timeoutSec > 0 {
+		hookAction["timeout"] = timeoutSec
+	}
 	newEntry := map[string]interface{}{
 		"matcher": "",
-		"hooks": []interface{}{
-			map[string]interface{}{
-				"type":    "command",
-				"command": navCommand,
-			},
-		},
+		"hooks":   []interface{}{hookAction},
 	}
 
 	hooks["UserPromptSubmit"] = append(existing, newEntry)

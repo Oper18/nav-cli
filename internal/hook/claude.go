@@ -18,6 +18,7 @@ type ClaudeHookEntry struct {
 type ClaudeHook struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
+	Timeout int    `json:"timeout,omitempty"`
 }
 
 // ContextResult holds a single search result to be formatted into context output.
@@ -45,10 +46,20 @@ const (
 // SessionStart (knowledge-graph summary injection) hooks into Claude Code
 // settings.json. settingsPath is the full path to the settings.json file.
 // project is the nav project name. topK is how many search results the
-// UserPromptSubmit hook injects. It returns installed=false when both hooks
-// were already present, so callers can tell a no-op apart from a fresh
-// install, and leaves settings.json untouched in that case.
-func InstallClaude(settingsPath, project string, topK int) (installed bool, err error) {
+// UserPromptSubmit hook injects. timeoutSec bounds that same hook (Claude
+// Code's own default is 30s, which a lazy sync + embed on a slow prompt can
+// blow through); it's written into the entry's "timeout" field, and a value
+// <= 0 omits the field so Claude Code's default applies. SessionStart only
+// reads an already-cached digest and never syncs (see
+// runHookRunClaudeSessionStart), so it carries no timeout override.
+//
+// Re-running InstallClaude when both hooks are already present does not
+// re-add them, but it does sync UserPromptSubmit's "timeout" field to the
+// current timeoutSec — so raising hooks.prompt_timeout_sec in config.yaml
+// and reinstalling actually takes effect instead of silently no-op'ing.
+// installed reports whether settings.json was modified at all (a fresh add
+// or a timeout sync), so callers can tell a true no-op apart from either.
+func InstallClaude(settingsPath, project string, topK, timeoutSec int) (installed bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
 		return false, fmt.Errorf("creating settings directory: %w", err)
 	}
@@ -67,13 +78,13 @@ func InstallClaude(settingsPath, project string, topK int) (installed bool, err 
 		"jq -r '.prompt' | nav hook run %s --type claude --top %d --query-stdin",
 		project, topK,
 	)
-	promptAdded := addClaudeHookEntry(settings, "UserPromptSubmit", promptCommand, claudeUserPromptMarker)
+	_, promptChanged := addClaudeHookEntry(settings, "UserPromptSubmit", promptCommand, claudeUserPromptMarker, timeoutSec)
 
 	sessionStartCommand := fmt.Sprintf("nav hook run %s --type claude-session-start", project)
-	sessionAdded := addClaudeHookEntry(settings, "SessionStart", sessionStartCommand, claudeSessionStartMarker)
+	_, sessionChanged := addClaudeHookEntry(settings, "SessionStart", sessionStartCommand, claudeSessionStartMarker, 0)
 
-	if !promptAdded && !sessionAdded {
-		return false, nil // already installed
+	if !promptChanged && !sessionChanged {
+		return false, nil // already installed, nothing to sync
 	}
 
 	if err := writeSettingsJSON(settingsPath, settings); err != nil {
@@ -82,10 +93,17 @@ func InstallClaude(settingsPath, project string, topK int) (installed bool, err 
 	return true, nil
 }
 
-// addClaudeHookEntry registers command under hooks.<event> in settings,
-// unless an entry containing marker is already present, in which case it
-// reports false without modifying settings.
-func addClaudeHookEntry(settings map[string]interface{}, event, command, marker string) bool {
+// addClaudeHookEntry registers command under hooks.<event> in settings. If an
+// entry containing marker is already present, it's left alone except that
+// its "timeout" field is synced to timeoutSec — so re-running `nav hook
+// install` after raising hooks.prompt_timeout_sec in config.yaml updates an
+// already-installed hook instead of silently no-op'ing — and added reports
+// false. Otherwise a new entry is appended and added reports true. changed
+// reports whether settings was actually modified either way, so the caller
+// knows whether to write the file. timeoutSec, when positive, is written as
+// the hook's "timeout" field; <= 0 omits it and Claude Code's own default
+// (30s) applies.
+func addClaudeHookEntry(settings map[string]interface{}, event, command, marker string, timeoutSec int) (added, changed bool) {
 	hooks, _ := settings["hooks"].(map[string]interface{})
 	if hooks == nil {
 		hooks = make(map[string]interface{})
@@ -94,22 +112,64 @@ func addClaudeHookEntry(settings map[string]interface{}, event, command, marker 
 
 	existing, _ := hooks[event].([]interface{})
 	for _, raw := range existing {
-		if entry, ok := raw.(map[string]interface{}); ok && entryContainsCommand(entry, marker) {
-			return false // already installed
+		entry, ok := raw.(map[string]interface{})
+		if !ok || !entryContainsCommand(entry, marker) {
+			continue
 		}
+		return false, syncHookTimeout(entry, marker, timeoutSec)
+	}
+
+	hookAction := map[string]interface{}{
+		"type":    "command",
+		"command": command,
+	}
+	if timeoutSec > 0 {
+		hookAction["timeout"] = timeoutSec
 	}
 
 	newEntry := map[string]interface{}{
 		"matcher": "",
-		"hooks": []interface{}{
-			map[string]interface{}{
-				"type":    "command",
-				"command": command,
-			},
-		},
+		"hooks":   []interface{}{hookAction},
 	}
 	hooks[event] = append(existing, newEntry)
-	return true
+	return true, true
+}
+
+// syncHookTimeout updates the "timeout" field of entry's hook action whose
+// command matches marker to timeoutSec, reporting whether the stored value
+// actually changed. timeoutSec <= 0 removes the field (Claude Code's own
+// default applies).
+func syncHookTimeout(entry map[string]interface{}, marker string, timeoutSec int) bool {
+	hookList, _ := entry["hooks"].([]interface{})
+	for _, h := range hookList {
+		hm, ok := h.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		cmd, _ := hm["command"].(string)
+		if !strings.Contains(cmd, marker) {
+			continue
+		}
+		current, hadTimeout := hm["timeout"]
+		if timeoutSec <= 0 {
+			if !hadTimeout {
+				return false
+			}
+			delete(hm, "timeout")
+			return true
+		}
+		if hadTimeout {
+			if n, ok := current.(float64); ok && int(n) == timeoutSec {
+				return false
+			}
+			if n, ok := current.(int); ok && n == timeoutSec {
+				return false
+			}
+		}
+		hm["timeout"] = timeoutSec
+		return true
+	}
+	return false
 }
 
 // UninstallClaude removes both nav hooks from Claude Code settings.json.

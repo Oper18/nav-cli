@@ -88,7 +88,7 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 			settingsPath = hook.DefaultSettingsPath(dir)
 		}
 		topK := cfg.Hooks.ClaudeTopK
-		installed, err := hook.InstallClaude(settingsPath, project, topK)
+		installed, err := hook.InstallClaude(settingsPath, project, topK, cfg.Hooks.PromptTimeoutSec)
 		if err != nil {
 			return fmt.Errorf("installing Claude hook: %w", err)
 		}
@@ -114,7 +114,7 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 			settingsPath = hook.QwenDefaultSettingsPath(dir)
 		}
 		topK := cfg.Hooks.QwenTopK // Use Qwen-specific configuration
-		installed, err := hook.InstallQwen(settingsPath, project, topK)
+		installed, err := hook.InstallQwen(settingsPath, project, topK, cfg.Hooks.PromptTimeoutSec)
 		if err != nil {
 			return fmt.Errorf("installing Qwen hook: %w", err)
 		}

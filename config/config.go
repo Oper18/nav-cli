@@ -68,19 +68,27 @@ type IndexingConfig struct {
 
 // HooksConfig holds settings used by git and editor hooks.
 type HooksConfig struct {
-	GitSkipEnv       string  `mapstructure:"git_skip_env"     yaml:"git_skip_env"`
-	ClaudeTopK       int     `mapstructure:"claude_top_k"     yaml:"claude_top_k"`
-	ClaudeMinScore   float64 `mapstructure:"claude_min_score" yaml:"claude_min_score"`
-	ClaudeMaxTokens  int     `mapstructure:"claude_max_tokens" yaml:"claude_max_tokens"`
-	QwenTopK         int     `mapstructure:"qwen_top_k"       yaml:"qwen_top_k"`
-	QwenMinScore     float64 `mapstructure:"qwen_min_score"   yaml:"qwen_min_score"`
-	QwenMaxTokens    int     `mapstructure:"qwen_max_tokens"  yaml:"qwen_max_tokens"`
-	CursorTopK       int     `mapstructure:"cursor_top_k"     yaml:"cursor_top_k"`
-	CursorMinScore   float64 `mapstructure:"cursor_min_score" yaml:"cursor_min_score"`
-	CursorMaxTokens  int     `mapstructure:"cursor_max_tokens" yaml:"cursor_max_tokens"`
-	OpenCodeTopK     int     `mapstructure:"opencode_top_k"   yaml:"opencode_top_k"`
-	OpenCodeMinScore float64 `mapstructure:"opencode_min_score" yaml:"opencode_min_score"`
-	OpenCodeMaxTokens int    `mapstructure:"opencode_max_tokens" yaml:"opencode_max_tokens"`
+	GitSkipEnv string `mapstructure:"git_skip_env"     yaml:"git_skip_env"`
+	// PromptTimeoutSec bounds the per-prompt hook (Claude Code's and Qwen
+	// Code's UserPromptSubmit), in seconds — one shared value for every code
+	// agent nav hooks into, rather than a setting per assistant. Both
+	// Claude Code and Qwen Code default their own hook timeout to 30s,
+	// which a lazy sync + embed on a slow prompt can outrun; it's written
+	// into each installed hook entry's "timeout" field, so raise this if
+	// you see "hook timed out".
+	PromptTimeoutSec  int     `mapstructure:"prompt_timeout_sec" yaml:"prompt_timeout_sec"`
+	ClaudeTopK        int     `mapstructure:"claude_top_k"     yaml:"claude_top_k"`
+	ClaudeMinScore    float64 `mapstructure:"claude_min_score" yaml:"claude_min_score"`
+	ClaudeMaxTokens   int     `mapstructure:"claude_max_tokens" yaml:"claude_max_tokens"`
+	QwenTopK          int     `mapstructure:"qwen_top_k"       yaml:"qwen_top_k"`
+	QwenMinScore      float64 `mapstructure:"qwen_min_score"   yaml:"qwen_min_score"`
+	QwenMaxTokens     int     `mapstructure:"qwen_max_tokens"  yaml:"qwen_max_tokens"`
+	CursorTopK        int     `mapstructure:"cursor_top_k"     yaml:"cursor_top_k"`
+	CursorMinScore    float64 `mapstructure:"cursor_min_score" yaml:"cursor_min_score"`
+	CursorMaxTokens   int     `mapstructure:"cursor_max_tokens" yaml:"cursor_max_tokens"`
+	OpenCodeTopK      int     `mapstructure:"opencode_top_k"   yaml:"opencode_top_k"`
+	OpenCodeMinScore  float64 `mapstructure:"opencode_min_score" yaml:"opencode_min_score"`
+	OpenCodeMaxTokens int     `mapstructure:"opencode_max_tokens" yaml:"opencode_max_tokens"`
 }
 
 // Config is the root configuration structure.
@@ -163,18 +171,19 @@ func Load() (*Config, error) {
 	v.SetDefault("indexing.min_lines", 3)
 
 	v.SetDefault("hooks.git_skip_env", "NAV_SKIP")
+	v.SetDefault("hooks.prompt_timeout_sec", 60) // shared by Claude and Qwen's UserPromptSubmit hook; 2x Claude Code's own 30s default
 	v.SetDefault("hooks.claude_top_k", 5)
 	v.SetDefault("hooks.claude_min_score", 0.72)
 	v.SetDefault("hooks.claude_max_tokens", 4000)
-	v.SetDefault("hooks.qwen_top_k", 5)              // Default to same as Claude
-	v.SetDefault("hooks.qwen_min_score", 0.72)       // Default to same as Claude
-	v.SetDefault("hooks.qwen_max_tokens", 4000)      // Default to same as Claude
-	v.SetDefault("hooks.cursor_top_k", 5)             // Default to same as Claude and Qwen
-	v.SetDefault("hooks.cursor_min_score", 0.72)      // Default to same as Claude and Qwen
-	v.SetDefault("hooks.cursor_max_tokens", 4000)     // Default to same as Claude and Qwen
-	v.SetDefault("hooks.opencode_top_k", 5)           // Default to same as Claude, Qwen, and Cursor
-	v.SetDefault("hooks.opencode_min_score", 0.72)    // Default to same as Claude, Qwen, and Cursor
-	v.SetDefault("hooks.opencode_max_tokens", 4000)   // Default to same as Claude, Qwen, and Cursor
+	v.SetDefault("hooks.qwen_top_k", 5)             // Default to same as Claude
+	v.SetDefault("hooks.qwen_min_score", 0.72)      // Default to same as Claude
+	v.SetDefault("hooks.qwen_max_tokens", 4000)     // Default to same as Claude
+	v.SetDefault("hooks.cursor_top_k", 5)           // Default to same as Claude and Qwen
+	v.SetDefault("hooks.cursor_min_score", 0.72)    // Default to same as Claude and Qwen
+	v.SetDefault("hooks.cursor_max_tokens", 4000)   // Default to same as Claude and Qwen
+	v.SetDefault("hooks.opencode_top_k", 5)         // Default to same as Claude, Qwen, and Cursor
+	v.SetDefault("hooks.opencode_min_score", 0.72)  // Default to same as Claude, Qwen, and Cursor
+	v.SetDefault("hooks.opencode_max_tokens", 4000) // Default to same as Claude, Qwen, and Cursor
 
 	// Config file location
 	v.SetConfigName("config")
@@ -325,18 +334,19 @@ func WriteDefault() error {
 			MinLines: 3,
 		},
 		Hooks: HooksConfig{
-			GitSkipEnv:      "NAV_SKIP",
-			ClaudeTopK:      5,
-			ClaudeMinScore:  0.4,
-			ClaudeMaxTokens: 4000,
-			QwenTopK:        5,
-			QwenMinScore:    0.4,
-			QwenMaxTokens:   4000,
-			CursorTopK:      5,
-			CursorMinScore:  0.4,
-			CursorMaxTokens: 4000,
-			OpenCodeTopK:    5,
-			OpenCodeMinScore: 0.4,
+			GitSkipEnv:        "NAV_SKIP",
+			PromptTimeoutSec:  60,
+			ClaudeTopK:        5,
+			ClaudeMinScore:    0.4,
+			ClaudeMaxTokens:   4000,
+			QwenTopK:          5,
+			QwenMinScore:      0.4,
+			QwenMaxTokens:     4000,
+			CursorTopK:        5,
+			CursorMinScore:    0.4,
+			CursorMaxTokens:   4000,
+			OpenCodeTopK:      5,
+			OpenCodeMinScore:  0.4,
 			OpenCodeMaxTokens: 4000,
 		},
 	}
