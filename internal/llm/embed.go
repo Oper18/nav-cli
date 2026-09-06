@@ -7,8 +7,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
+	"time"
 )
+
+// embedRateLimitDelay is how long Embed waits before retrying after the
+// embeddings endpoint responds with HTTP 429 (rate limit exceeded). Free-tier
+// OpenRouter rate limits reset per minute, so this comfortably clears the
+// window before the next attempt.
+const embedRateLimitDelay = 2 * time.Minute
 
 // embedRequest is the OpenRouter embeddings request body.
 type embedRequest struct {
@@ -46,43 +54,70 @@ func (c *Client) EmbedQuery(ctx context.Context, model, instruction string, quer
 }
 
 // Embed sends texts to OpenRouter's embeddings endpoint using the given model
-// and returns vectors in input order.
+// and returns vectors in input order. On a 429 (rate limit exceeded) response
+// it waits out embedRateLimitDelay and retries indefinitely, since indexing
+// runs can be long-lived and the free-tier per-minute limit is transient; a
+// cancelled or deadline-exceeded ctx still aborts the wait immediately.
 func (c *Client) Embed(ctx context.Context, model string, texts []string) ([][]float32, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.embedTimeout)
-	defer cancel()
-
 	body, err := json.Marshal(embedRequest{Model: model, Input: texts})
 	if err != nil {
 		return nil, fmt.Errorf("marshal embed request: %w", err)
 	}
 
+	for {
+		out, rateLimited, err := c.doEmbed(ctx, body)
+		if !rateLimited {
+			return out, err
+		}
+
+		fmt.Fprintf(os.Stderr, "\nembed: rate limited (429), waiting %s before retrying...\n", embedRateLimitDelay)
+		select {
+		case <-time.After(embedRateLimitDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// doEmbed performs a single embeddings request attempt, bounded by
+// c.embedTimeout. The second return value is true when the response was a
+// 429 (rate limited), signalling to Embed that the request should be retried
+// rather than treated as a terminal failure.
+func (c *Client) doEmbed(ctx context.Context, body []byte) ([][]float32, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.embedTimeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/embeddings", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("build embed request: %w", err)
+		return nil, false, fmt.Errorf("build embed request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("embed request: %w", err)
+		return nil, false, fmt.Errorf("embed request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read embed response: %w", err)
+		return nil, false, fmt.Errorf("read embed response: %w", err)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, true, fmt.Errorf("embed: status %d: %s", resp.StatusCode, raw)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("embed: status %d: %s", resp.StatusCode, raw)
+		return nil, false, fmt.Errorf("embed: status %d: %s", resp.StatusCode, raw)
 	}
 
 	var parsed embedResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("decode embed response: %w", err)
+		return nil, false, fmt.Errorf("decode embed response: %w", err)
 	}
 	if parsed.Error != nil {
-		return nil, fmt.Errorf("embed: API error (code %d): %s", parsed.Error.Code, parsed.Error.Message)
+		rateLimited := parsed.Error.Code == http.StatusTooManyRequests
+		return nil, rateLimited, fmt.Errorf("embed: API error (code %d): %s", parsed.Error.Code, parsed.Error.Message)
 	}
 
 	// Preserve input order.
@@ -94,5 +129,5 @@ func (c *Client) Embed(ctx context.Context, model string, texts []string) ([][]f
 	for i, d := range parsed.Data {
 		out[i] = d.Embedding
 	}
-	return out, nil
+	return out, false, nil
 }
