@@ -66,10 +66,14 @@ func runHookInstall(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("installing git hook: %w", err)
 		}
+		hooksDir, err := hook.HooksDir(path)
+		if err != nil {
+			return fmt.Errorf("resolving git hooks directory: %w", err)
+		}
 		if installed {
-			fmt.Printf("nav git hooks installed in %s/.git/hooks/ (pre-commit + post-merge + post-rewrite + reference-transaction)\n", path)
+			fmt.Printf("nav git hooks installed in %s/ (pre-commit + post-merge + post-rewrite + reference-transaction)\n", hooksDir)
 		} else {
-			fmt.Printf("nav git hooks already installed in %s/.git/hooks/, skipping\n", path)
+			fmt.Printf("nav git hooks already installed in %s/, skipping\n", hooksDir)
 		}
 
 	case "claude":
@@ -209,7 +213,17 @@ func runHookUninstall(cmd *cobra.Command, args []string) error {
 		if err := hook.Uninstall(path); err != nil {
 			return fmt.Errorf("uninstalling git hook: %w", err)
 		}
-		fmt.Printf("nav git hooks removed from %s/.git/hooks/ (pre-commit + post-merge + post-rewrite + reference-transaction)\n", path)
+		// hook.Uninstall treats a path that doesn't resolve to a git
+		// directory as a no-op rather than an error (see its docs), so
+		// HooksDir can still fail here even though Uninstall just
+		// succeeded; fall back to a generic message rather than erroring
+		// the whole command over a path that was never a repo to begin
+		// with.
+		if hooksDir, err := hook.HooksDir(path); err == nil {
+			fmt.Printf("nav git hooks removed from %s/ (pre-commit + post-merge + post-rewrite + reference-transaction)\n", hooksDir)
+		} else {
+			fmt.Printf("nav git hooks removed from %s (pre-commit + post-merge + post-rewrite + reference-transaction)\n", path)
+		}
 
 	case "claude":
 		var settingsPath string

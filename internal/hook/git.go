@@ -77,9 +77,9 @@ exit 0
 // reference-transaction, covering every flavor of `git pull`) — a push
 // doesn't change what's on disk, so there's nothing for it to (re-)index.
 func Install(repoPath string, cfg *config.Config) (installed bool, err error) {
-	gitDir := filepath.Join(repoPath, ".git")
-	if _, err := os.Stat(gitDir); err != nil {
-		return false, fmt.Errorf("not a git repository (no .git found in %s): %w", repoPath, err)
+	gitDir, err := resolveGitDir(repoPath)
+	if err != nil {
+		return false, err
 	}
 
 	hooksDir := filepath.Join(gitDir, "hooks")
@@ -120,6 +120,66 @@ func Install(repoPath string, cfg *config.Config) (installed bool, err error) {
 	return preCommitInstalled || postMergeInstalled || postRewriteInstalled || refTxInstalled, nil
 }
 
+// HooksDir returns the directory repoPath's git hooks live in (or would be
+// installed to) — ordinarily <repoPath>/.git/hooks, but
+// <superproject>/.git/modules/<name>/hooks for a submodule checkout. It's
+// exposed for callers (e.g. the `nav hook install/uninstall` CLI) that want
+// to report the real on-disk location rather than assuming <repoPath>/.git
+// is always a directory.
+func HooksDir(repoPath string) (string, error) {
+	gitDir, err := resolveGitDir(repoPath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(gitDir, "hooks"), nil
+}
+
+// resolveGitDir returns the actual git directory for repoPath — the
+// directory that holds hooks/, refs/, and objects/. For an ordinary
+// repository (including the top-level checkout of a repo that has
+// submodules) this is simply <repoPath>/.git. For a git submodule, however,
+// <repoPath>/.git is not a directory at all: git replaces it with a *file*
+// containing a single "gitdir: <path>" line pointing at the real git
+// directory, normally <superproject>/.git/modules/<name>/ — that's where
+// the submodule's own hooks/ lives, and hooks installed there fire only for
+// commits/pulls made inside the submodule, leaving the superproject (and
+// any of its other submodules) untouched. Naively treating
+// <repoPath>/.git/hooks as the hooks directory would try to MkdirAll a
+// "hooks" child of a regular file and fail outright.
+// See https://git-scm.com/docs/gitrepository-layout#_the_gitdir_file.
+func resolveGitDir(repoPath string) (string, error) {
+	gitPath := filepath.Join(repoPath, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return "", fmt.Errorf("not a git repository (no .git found in %s): %w", repoPath, err)
+	}
+	if info.IsDir() {
+		return gitPath, nil
+	}
+
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", gitPath, err)
+	}
+	line := strings.TrimSpace(string(data))
+	target := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+	if target == "" || target == line {
+		return "", fmt.Errorf("%s is not a directory and doesn't look like a submodule gitdir pointer (expected a \"gitdir: <path>\" line)", gitPath)
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(repoPath, target)
+	}
+	target = filepath.Clean(target)
+	fi, statErr := os.Stat(target)
+	if statErr != nil {
+		return "", fmt.Errorf("resolving submodule git dir %s (pointed to by %s): %w", target, gitPath, statErr)
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("submodule git dir %s (pointed to by %s) is not a directory", target, gitPath)
+	}
+	return target, nil
+}
+
 // installHook writes or appends a nav hook script to the given hook file. It
 // returns installed=false when the file already carried a nav-hook marker,
 // so no write happened.
@@ -157,13 +217,24 @@ func installHook(hooksDir, hookName, fullScript, appendBlock string) (installed 
 }
 
 // Uninstall removes the nav pre-commit, post-merge, post-rewrite, and
-// reference-transaction hooks from <repoPath>/.git/hooks/. If a hook file
-// was entirely nav-generated (contains the nav marker), it removes the
-// file. If it was appended, it removes only the nav lines. It also cleans
-// up a pre-push hook left behind by an older nav version, which used to
-// sync on push; nav no longer installs one.
+// reference-transaction hooks from repoPath's git hooks directory (ordinarily
+// <repoPath>/.git/hooks, or <superproject>/.git/modules/<name>/hooks for a
+// submodule — see resolveGitDir). If a hook file was entirely nav-generated
+// (contains the nav marker), it removes the file. If it was appended, it
+// removes only the nav lines. It also cleans up a pre-push hook left behind
+// by an older nav version, which used to sync on push; nav no longer
+// installs one.
+//
+// repoPath not resolving to a git directory at all (already deleted from
+// disk, never was a repo, ...) is treated as a no-op rather than an error —
+// callers like `nav delete` invoke this unconditionally as cleanup, and
+// there's nothing to uninstall from a repo that isn't there.
 func Uninstall(repoPath string) error {
-	hooksDir := filepath.Join(repoPath, ".git", "hooks")
+	gitDir, err := resolveGitDir(repoPath)
+	if err != nil {
+		return nil
+	}
+	hooksDir := filepath.Join(gitDir, "hooks")
 
 	if err := uninstallHook(hooksDir, "pre-commit"); err != nil {
 		return fmt.Errorf("uninstalling pre-commit hook: %w", err)

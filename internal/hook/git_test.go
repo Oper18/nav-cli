@@ -219,6 +219,116 @@ func TestUninstallRemovesLegacyPrePushHook(t *testing.T) {
 	}
 }
 
+// initSubmodule lays out a repo the way git actually does for a submodule
+// checkout: <super>/.git/modules/<name>/ holds the real git directory, and
+// <super>/<name>/.git is a *file* containing "gitdir: <relative-path>"
+// pointing back at it — mirroring what `git submodule add` produces (see
+// e.g. .gitmodules-based checkouts like etb-app inside etb-platform). It
+// returns the submodule's working-tree path (what a caller would pass as
+// --path) and the real git dir hooks should land in.
+func initSubmodule(t *testing.T, super, name string) (subRepo, realGitDir string) {
+	t.Helper()
+	realGitDir = filepath.Join(super, ".git", "modules", name)
+	if err := os.MkdirAll(realGitDir, 0755); err != nil {
+		t.Fatalf("creating submodule git dir: %v", err)
+	}
+	subRepo = filepath.Join(super, name)
+	if err := os.MkdirAll(subRepo, 0755); err != nil {
+		t.Fatalf("creating submodule worktree: %v", err)
+	}
+	gitFile := filepath.Join(subRepo, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: ../.git/modules/"+name+"\n"), 0644); err != nil {
+		t.Fatalf("writing submodule .git file: %v", err)
+	}
+	return subRepo, realGitDir
+}
+
+// TestInstallResolvesSubmoduleGitDir verifies that installing hooks against
+// a submodule's working-tree path writes them into the superproject's
+// .git/modules/<name>/hooks/, not <submodule>/.git/hooks/ (which can't
+// exist — .git there is a file, not a directory). This is what makes it
+// possible to install nav's git hook on just one submodule (e.g. etb-app
+// inside etb-platform) without touching the superproject or its other
+// submodules.
+func TestInstallResolvesSubmoduleGitDir(t *testing.T) {
+	super := t.TempDir()
+	subRepo, realGitDir := initSubmodule(t, super, "etb-app")
+
+	installed, err := Install(subRepo, testConfig())
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if !installed {
+		t.Error("expected installed = true on a fresh submodule")
+	}
+
+	for _, name := range []string{"pre-commit", "post-merge", "post-rewrite", "reference-transaction"} {
+		path := filepath.Join(realGitDir, "hooks", name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s under the submodule's real git dir: %v", name, err)
+		}
+		if len(data) == 0 {
+			t.Errorf("%s hook file is empty", name)
+		}
+	}
+
+	// Nothing should have been written under <subRepo>/.git — it's a file,
+	// not a directory, so there's nowhere for a "hooks" subdirectory to go.
+	if fi, err := os.Stat(filepath.Join(subRepo, ".git")); err != nil || fi.IsDir() {
+		t.Errorf("expected %s/.git to remain a plain gitdir-pointer file, stat = %+v, err = %v", subRepo, fi, err)
+	}
+
+	if err := Uninstall(subRepo); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	for _, name := range []string{"pre-commit", "post-merge", "post-rewrite", "reference-transaction"} {
+		path := filepath.Join(realGitDir, "hooks", name)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed from the submodule's real git dir, stat err = %v", name, err)
+		}
+	}
+}
+
+// TestInstallResolvesSubmoduleGitDirAbsolutePointer covers the (rarer, but
+// git-legal) case where the ".git" file's "gitdir:" line is an absolute
+// path rather than one relative to the submodule's working tree.
+func TestInstallResolvesSubmoduleGitDirAbsolutePointer(t *testing.T) {
+	super := t.TempDir()
+	realGitDir := filepath.Join(super, ".git", "modules", "etb-app")
+	if err := os.MkdirAll(realGitDir, 0755); err != nil {
+		t.Fatalf("creating submodule git dir: %v", err)
+	}
+	subRepo := filepath.Join(super, "etb-app")
+	if err := os.MkdirAll(subRepo, 0755); err != nil {
+		t.Fatalf("creating submodule worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subRepo, ".git"), []byte("gitdir: "+realGitDir+"\n"), 0644); err != nil {
+		t.Fatalf("writing submodule .git file: %v", err)
+	}
+
+	if _, err := Install(subRepo, testConfig()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(realGitDir, "hooks", "pre-commit")); err != nil {
+		t.Fatalf("expected pre-commit hook under the absolute gitdir target: %v", err)
+	}
+}
+
+// TestInstallRejectsMalformedGitFile ensures a ".git" file that isn't a
+// recognized "gitdir: <path>" pointer produces a clear error instead of a
+// confusing MkdirAll failure or a silent no-op.
+func TestInstallRejectsMalformedGitFile(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, ".git"), []byte("not a gitdir pointer\n"), 0644); err != nil {
+		t.Fatalf("writing malformed .git file: %v", err)
+	}
+
+	if _, err := Install(repo, testConfig()); err == nil {
+		t.Error("expected Install to fail on a malformed .git file")
+	}
+}
+
 func TestInstallAppendsToExistingPostRewriteHook(t *testing.T) {
 	repo := initRepo(t)
 	existing := "#!/bin/sh\necho custom hook\n"

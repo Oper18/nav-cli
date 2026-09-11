@@ -844,6 +844,21 @@ Each hook is installed per-repository and does not affect other repos. If a
 hook file already exists and isn't nav's, nav appends its call rather than
 overwriting the file.
 
+**Submodules.** `--path` can point at a git submodule's own working-tree
+checkout, not just a top-level repo. A submodule's `.git` is a *file*
+pointing at the real git directory inside the superproject (normally
+`<superproject>/.git/modules/<name>/`), and nav resolves that pointer rather
+than assuming `<path>/.git` is a directory — so the hooks land in the
+submodule's own `hooks/` directory and fire only for commits/pulls made
+inside that submodule, leaving the superproject and its other submodules
+untouched. This is what lets you index and hook a single submodule (e.g.
+`etb-app` inside an `etb-platform` superproject) as its own nav project,
+developed and committed to independently of the rest of the superproject:
+
+```bash
+nav hook install --type git --path ~/work/etb-platform/etb-app
+```
+
 ### Skipping the hook
 
 The hook respects the `NAV_SKIP` environment variable (configurable via `hooks.git_skip_env`):
