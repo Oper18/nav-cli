@@ -20,8 +20,9 @@ const embedRateLimitDelay = 2 * time.Minute
 
 // embedRequest is the OpenRouter embeddings request body.
 type embedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model      string   `json:"model"`
+	Input      []string `json:"input"`
+	Dimensions int      `json:"dimensions,omitempty"`
 }
 
 // embedResponse is the OpenRouter embeddings response body.
@@ -59,7 +60,7 @@ func (c *Client) EmbedQuery(ctx context.Context, model, instruction string, quer
 // runs can be long-lived and the free-tier per-minute limit is transient; a
 // cancelled or deadline-exceeded ctx still aborts the wait immediately.
 func (c *Client) Embed(ctx context.Context, model string, texts []string) ([][]float32, error) {
-	body, err := json.Marshal(embedRequest{Model: model, Input: texts})
+	body, err := json.Marshal(embedRequest{Model: model, Input: texts, Dimensions: c.embedDimensions})
 	if err != nil {
 		return nil, fmt.Errorf("marshal embed request: %w", err)
 	}

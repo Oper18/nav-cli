@@ -30,6 +30,9 @@ type Client struct {
 	requestTimeout time.Duration
 	embedTimeout   time.Duration
 	readmeTimeout  time.Duration
+	// embedDimensions, when positive, is sent as the embeddings "dimensions"
+	// parameter so Matryoshka models return vectors of that size.
+	embedDimensions int
 }
 
 // NewClientWithEmbedTimeout creates a new Client using the given API key and models.
@@ -256,4 +259,10 @@ func (c *Client) SummariseBatch(ctx context.Context, reqs []SummariseRequest, co
 
 	wg.Wait()
 	return results, errs
+}
+
+// SetEmbedDimensions makes Embed request vectors of n dimensions; n <= 0 leaves
+// the model's native size.
+func (c *Client) SetEmbedDimensions(n int) {
+	c.embedDimensions = n
 }

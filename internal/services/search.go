@@ -88,6 +88,7 @@ func Search(ctx context.Context, project string, opts SearchOptions) ([]qdrant.H
 
 	llmClient := llm.NewClient(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
 		time.Duration(cfg.LLM.RequestTimeout)*time.Second, time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
+	llmClient.SetEmbedDimensions(cfg.Embedding.Dimension)
 
 	vecs, err := llmClient.EmbedQuery(ctx, cfg.Embedding.Model, cfg.Embedding.QueryInstruction, []string{opts.Query})
 	if err != nil {
