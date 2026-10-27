@@ -31,7 +31,7 @@ func InstallOpenCode(dir, project string, topK int) (installed bool, err error) 
 
 	// Check if already installed by reading the file
 	if data, err := os.ReadFile(pluginPath); err == nil {
-		if strings.Contains(string(data), "nav hook run") && strings.Contains(string(data), "--type opencode") {
+		if strings.Contains(string(data), "nav hook run") && strings.Contains(string(data), "--type opencode") && strings.Contains(string(data), "--type opencode-post-edit") && strings.Contains(string(data), "--type opencode-pre-prompt") {
 			return false, nil // already installed
 		}
 	}
@@ -39,6 +39,7 @@ func InstallOpenCode(dir, project string, topK int) (installed bool, err error) 
 	pluginContent := fmt.Sprintf(`import { tool } from "@opencode-ai/plugin";
 
 export const NavHookPlugin = async ({ directory, $ }) => {
+  const project = "%s";
   return {
     tool: {
       nav_context: tool({
@@ -57,10 +58,21 @@ export const NavHookPlugin = async ({ directory, $ }) => {
           }
         }
       })
+    },
+    "chat.message": async () => {
+      try {
+        await $` + "`nav hook run ${project} --type opencode-pre-prompt`" + `.quiet();
+      } catch (error) {}
+    },
+    "tool.execute.after": async (input) => {
+      if (!["edit", "write", "patch"].includes(input.tool)) return;
+      try {
+        await $` + "`nav hook run ${project} --type opencode-post-edit`" + `.quiet();
+      } catch (error) {}
     }
   }
 };
-`, project, topK)
+`, project, project, topK)
 
 	if err := os.WriteFile(pluginPath, []byte(pluginContent), 0644); err != nil {
 		return false, err

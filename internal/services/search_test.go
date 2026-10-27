@@ -89,3 +89,14 @@ func TestCollapseChunksSortsByScoreDescending(t *testing.T) {
 		}
 	}
 }
+
+func TestFilterMinScoreAfterCollapseDropsStaleParentTwin(t *testing.T) {
+	hits := []qdrant.Hit{
+		{Score: 0.4, Payload: qdrant.Payload{Branch: "feat", FilePath: "a.go", Symbol: "F"}},
+		{Score: 0.9, Payload: qdrant.Payload{Branch: "main", FilePath: "a.go", Symbol: "F"}},
+	}
+	out := filterMinScore(collapseChunks(hits, map[string]int{"feat": 0, "main": 1}), 0.5)
+	if len(out) != 0 {
+		t.Fatalf("got %+v, want none: stale parent twin must not surface", out)
+	}
+}

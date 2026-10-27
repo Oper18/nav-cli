@@ -11,7 +11,7 @@ import (
 // in hooks.json, for install idempotency and uninstall.
 const cursorSessionStartMarker = "--type cursor-session-start"
 
-// InstallCursor writes nav's sessionStart hook into Cursor's hooks.json.
+// InstallCursor writes nav's sessionStart, afterFileEdit and beforeSubmitPrompt hooks into Cursor's hooks.json.
 // hooksPath is the full path to hooks.json (project: .cursor/hooks.json,
 // global: ~/.cursor/hooks.json — see CursorDefaultSettingsPath and
 // CursorGlobalSettingsPath). project is the nav project name. It returns
@@ -49,15 +49,14 @@ func InstallCursor(hooksPath, project string) (installed bool, err error) {
 
 	command := fmt.Sprintf("nav hook run %s --type cursor-session-start", project)
 
-	existing, _ := hooks["sessionStart"].([]interface{})
-	for _, raw := range existing {
-		if entry, ok := raw.(map[string]interface{}); ok && cursorEntryContainsCommand(entry, cursorSessionStartMarker) {
-			return false, nil // already installed
-		}
+	startAdded := addCursorHookEntry(hooks, "sessionStart", command, cursorSessionStartMarker)
+	editCommand := fmt.Sprintf("nav hook run %s --type cursor-post-edit", project)
+	editAdded := addCursorHookEntry(hooks, "afterFileEdit", editCommand, cursorPostEditMarker)
+	promptCommand := fmt.Sprintf("nav hook run %s --type cursor-pre-prompt", project)
+	promptAdded := addCursorHookEntry(hooks, "beforeSubmitPrompt", promptCommand, cursorPrePromptMarker)
+	if !startAdded && !editAdded && !promptAdded {
+		return false, nil // already installed
 	}
-
-	newEntry := map[string]interface{}{"command": command}
-	hooks["sessionStart"] = append(existing, newEntry)
 
 	if err := writeSettingsJSON(hooksPath, settings); err != nil {
 		return false, err
@@ -65,7 +64,7 @@ func InstallCursor(hooksPath, project string) (installed bool, err error) {
 	return true, nil
 }
 
-// UninstallCursor removes the nav sessionStart hook from Cursor's hooks.json.
+// UninstallCursor removes the nav hooks from Cursor's hooks.json.
 func UninstallCursor(hooksPath string) error {
 	settings, err := readSettingsJSON(hooksPath)
 	if err != nil {
@@ -80,20 +79,9 @@ func UninstallCursor(hooksPath string) error {
 		return nil
 	}
 
-	existing, ok := hooks["sessionStart"].([]interface{})
-	if !ok {
-		return nil
-	}
-
-	filtered := make([]interface{}, 0, len(existing))
-	for _, raw := range existing {
-		entry, ok := raw.(map[string]interface{})
-		if !ok || !cursorEntryContainsCommand(entry, cursorSessionStartMarker) {
-			filtered = append(filtered, raw)
-		}
-	}
-
-	hooks["sessionStart"] = filtered
+	removeCursorHookEntry(hooks, "sessionStart", cursorSessionStartMarker)
+	removeCursorHookEntry(hooks, "afterFileEdit", cursorPostEditMarker)
+	removeCursorHookEntry(hooks, "beforeSubmitPrompt", cursorPrePromptMarker)
 	return writeSettingsJSON(hooksPath, settings)
 }
 
@@ -119,3 +107,38 @@ func cursorEntryContainsCommand(entry map[string]interface{}, marker string) boo
 	cmd, _ := entry["command"].(string)
 	return strings.Contains(cmd, marker)
 }
+
+// cursorPostEditMarker identifies nav's afterFileEdit sync entry.
+const cursorPostEditMarker = "--type cursor-post-edit"
+
+// addCursorHookEntry appends a flat {"command"} entry under hooks.<event>
+// unless one containing marker exists; it reports whether it added one.
+func addCursorHookEntry(hooks map[string]interface{}, event, command, marker string) bool {
+	existing, _ := hooks[event].([]interface{})
+	for _, raw := range existing {
+		if entry, ok := raw.(map[string]interface{}); ok && cursorEntryContainsCommand(entry, marker) {
+			return false
+		}
+	}
+	hooks[event] = append(existing, map[string]interface{}{"command": command})
+	return true
+}
+
+// removeCursorHookEntry drops every hooks.<event> entry containing marker.
+func removeCursorHookEntry(hooks map[string]interface{}, event, marker string) {
+	existing, ok := hooks[event].([]interface{})
+	if !ok {
+		return
+	}
+	filtered := make([]interface{}, 0, len(existing))
+	for _, raw := range existing {
+		entry, ok := raw.(map[string]interface{})
+		if !ok || !cursorEntryContainsCommand(entry, marker) {
+			filtered = append(filtered, raw)
+		}
+	}
+	hooks[event] = filtered
+}
+
+// cursorPrePromptMarker identifies nav's beforeSubmitPrompt sync entry.
+const cursorPrePromptMarker = "--type cursor-pre-prompt"

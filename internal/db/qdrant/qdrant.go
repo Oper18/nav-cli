@@ -508,3 +508,18 @@ func getStringList(m map[string]*sdk.Value, key string) []string {
 	}
 	return out
 }
+
+// BranchHasPoints reports whether collection holds at least one point whose
+// "branch" payload equals branch. A missing collection is an error.
+func (c *Client) BranchHasPoints(ctx context.Context, collection, branch string) (bool, error) {
+	exact := false
+	n, err := c.sdk.Count(ctx, &sdk.CountPoints{
+		CollectionName: collection,
+		Filter:         &sdk.Filter{Must: []*sdk.Condition{sdk.NewMatchKeyword("branch", branch)}},
+		Exact:          &exact,
+	})
+	if err != nil {
+		return false, fmt.Errorf("counting branch %q points in %q: %w", branch, collection, err)
+	}
+	return n > 0, nil
+}

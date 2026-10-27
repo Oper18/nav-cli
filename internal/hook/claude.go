@@ -78,12 +78,15 @@ func InstallClaude(settingsPath, project string, topK, timeoutSec int) (installe
 		"jq -r '.prompt' | nav hook run %s --type claude --top %d --query-stdin",
 		project, topK,
 	)
-	_, promptChanged := addClaudeHookEntry(settings, "UserPromptSubmit", promptCommand, claudeUserPromptMarker, timeoutSec)
+	_, promptChanged := addClaudeHookEntry(settings, "UserPromptSubmit", "", promptCommand, claudeUserPromptMarker, timeoutSec)
 
 	sessionStartCommand := fmt.Sprintf("nav hook run %s --type claude-session-start", project)
-	_, sessionChanged := addClaudeHookEntry(settings, "SessionStart", sessionStartCommand, claudeSessionStartMarker, 0)
+	_, sessionChanged := addClaudeHookEntry(settings, "SessionStart", "", sessionStartCommand, claudeSessionStartMarker, 0)
 
-	if !promptChanged && !sessionChanged {
+	postEditCommand := fmt.Sprintf("nav hook run %s --type claude-post-edit", project)
+	_, postEditChanged := addClaudeHookEntry(settings, "PostToolUse", claudePostEditMatcher, postEditCommand, claudePostEditMarker, timeoutSec)
+
+	if !promptChanged && !sessionChanged && !postEditChanged {
 		return false, nil // already installed, nothing to sync
 	}
 
@@ -103,7 +106,7 @@ func InstallClaude(settingsPath, project string, topK, timeoutSec int) (installe
 // knows whether to write the file. timeoutSec, when positive, is written as
 // the hook's "timeout" field; <= 0 omits it and Claude Code's own default
 // (30s) applies.
-func addClaudeHookEntry(settings map[string]interface{}, event, command, marker string, timeoutSec int) (added, changed bool) {
+func addClaudeHookEntry(settings map[string]interface{}, event, matcher, command, marker string, timeoutSec int) (added, changed bool) {
 	hooks, _ := settings["hooks"].(map[string]interface{})
 	if hooks == nil {
 		hooks = make(map[string]interface{})
@@ -128,7 +131,7 @@ func addClaudeHookEntry(settings map[string]interface{}, event, command, marker 
 	}
 
 	newEntry := map[string]interface{}{
-		"matcher": "",
+		"matcher": matcher,
 		"hooks":   []interface{}{hookAction},
 	}
 	hooks[event] = append(existing, newEntry)
@@ -172,7 +175,7 @@ func syncHookTimeout(entry map[string]interface{}, marker string, timeoutSec int
 	return false
 }
 
-// UninstallClaude removes both nav hooks from Claude Code settings.json.
+// UninstallClaude removes all nav hooks from Claude Code settings.json.
 func UninstallClaude(settingsPath string) error {
 	settings, err := readSettingsJSON(settingsPath)
 	if err != nil {
@@ -189,6 +192,7 @@ func UninstallClaude(settingsPath string) error {
 
 	removeClaudeHookEntry(hooks, "UserPromptSubmit", claudeUserPromptMarker)
 	removeClaudeHookEntry(hooks, "SessionStart", claudeSessionStartMarker)
+	removeClaudeHookEntry(hooks, "PostToolUse", claudePostEditMarker)
 
 	return writeSettingsJSON(settingsPath, settings)
 }
@@ -314,3 +318,9 @@ func entryContainsCommand(entry map[string]interface{}, marker string) bool {
 	}
 	return false
 }
+
+// Sync runs after file-editing tools so the index tracks applied changes.
+const (
+	claudePostEditMarker  = "--type claude-post-edit"
+	claudePostEditMatcher = "Edit|Write|MultiEdit|NotebookEdit"
+)

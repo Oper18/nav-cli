@@ -77,3 +77,8 @@ func (c *Client) ExistingIDs(ctx context.Context, collection string, ids []strin
 func (c *Client) CollectionPointsCount(ctx context.Context, name string) (int64, bool, error) {
 	return c.Qdrant.CollectionPointsCount(ctx, name)
 }
+
+// BranchHasPoints reports whether collection holds points for branch.
+func (c *Client) BranchHasPoints(ctx context.Context, collection, branch string) (bool, error) {
+	return c.Qdrant.BranchHasPoints(ctx, collection, branch)
+}

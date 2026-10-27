@@ -133,11 +133,21 @@ func Search(ctx context.Context, project string, opts SearchOptions) ([]qdrant.H
 	}
 	defer qdrantClient.Close()
 
-	results, err := qdrantClient.Search(ctx, collection, queryVec, overFetch(opts.Top, len(branchIn)), threshold, filters, branchIn)
+	// With a chain the threshold must apply after collapsing, else a weak
+	// current-branch point is dropped and its stale parent twin resurfaces.
+	qdrantThreshold := threshold
+	if len(branchIn) > 0 {
+		qdrantThreshold = 0
+	}
+	results, err := qdrantClient.Search(ctx, collection, queryVec, overFetch(opts.Top, len(branchIn)), qdrantThreshold, filters, branchIn)
 	if err != nil {
 		return nil, fmt.Errorf("searching: %w", err)
 	}
-	return topN(collapseChunks(results, branchChainRank(opts.BranchChain)), opts.Top), nil
+	collapsed := collapseChunks(results, branchChainRank(opts.BranchChain))
+	if len(branchIn) > 0 {
+		collapsed = filterMinScore(collapsed, threshold)
+	}
+	return topN(collapsed, opts.Top), nil
 }
 
 // chunkFanout is how many extra candidates to request before collapsing chunks
@@ -223,4 +233,18 @@ func topN(hits []qdrant.Hit, n int) []qdrant.Hit {
 		return hits[:n]
 	}
 	return hits
+}
+
+// filterMinScore drops hits scoring below min; a non-positive min keeps all.
+func filterMinScore(hits []qdrant.Hit, min float64) []qdrant.Hit {
+	if min <= 0 {
+		return hits
+	}
+	out := make([]qdrant.Hit, 0, len(hits))
+	for _, h := range hits {
+		if float64(h.Score) >= min {
+			out = append(out, h)
+		}
+	}
+	return out
 }

@@ -56,38 +56,45 @@ func InstallQwen(settingsPath, project string, topK, timeoutSec int) (installed 
 	)
 
 	// Check if already installed; if so, just sync its timeout field.
+	changed := false
 	existing, _ := hooks["UserPromptSubmit"].([]interface{})
+	found := false
 	for _, raw := range existing {
 		entry, ok := raw.(map[string]interface{})
 		if !ok {
 			continue
 		}
 		if entryContainsNavQwen(entry) {
-			if !syncHookTimeout(entry, "--type qwen", timeoutSec) {
-				return false, nil // already installed, nothing to sync
-			}
-			if err := writeSettingsJSON(settingsPath, settings); err != nil {
-				return false, err
-			}
-			return true, nil
+			found = true
+			changed = syncHookTimeout(entry, "--type qwen ", timeoutSec)
+			break
 		}
 	}
 
-	// Build the new entry as a plain map so it round-trips cleanly.
-	hookAction := map[string]interface{}{
-		"type":    "command",
-		"command": navCommand,
-	}
-	if timeoutSec > 0 {
-		hookAction["timeout"] = timeoutSec
-	}
-	newEntry := map[string]interface{}{
-		"matcher": "",
-		"hooks":   []interface{}{hookAction},
+	if !found {
+		// Build the new entry as a plain map so it round-trips cleanly.
+		hookAction := map[string]interface{}{
+			"type":    "command",
+			"command": navCommand,
+		}
+		if timeoutSec > 0 {
+			hookAction["timeout"] = timeoutSec
+		}
+		newEntry := map[string]interface{}{
+			"matcher": "",
+			"hooks":   []interface{}{hookAction},
+		}
+
+		hooks["UserPromptSubmit"] = append(existing, newEntry)
+		changed = true
 	}
 
-	hooks["UserPromptSubmit"] = append(existing, newEntry)
+	postEditCommand := fmt.Sprintf("nav hook run %s --type qwen-post-edit", project)
+	_, postEditChanged := addClaudeHookEntry(settings, "PostToolUse", qwenPostEditMatcher, postEditCommand, qwenPostEditMarker, timeoutSec)
 
+	if !changed && !postEditChanged {
+		return false, nil // already installed, nothing to sync
+	}
 	if err := writeSettingsJSON(settingsPath, settings); err != nil {
 		return false, err
 	}
@@ -109,9 +116,11 @@ func UninstallQwen(settingsPath string) error {
 		return nil
 	}
 
+	removeClaudeHookEntry(hooks, "PostToolUse", qwenPostEditMarker)
+
 	existing, ok := hooks["UserPromptSubmit"].([]interface{})
 	if !ok {
-		return nil
+		return writeSettingsJSON(settingsPath, settings)
 	}
 
 	filtered := make([]interface{}, 0, len(existing))
@@ -166,9 +175,15 @@ func entryContainsNavQwen(entry map[string]interface{}) bool {
 		if !ok {
 			continue
 		}
-		if cmd, _ := hm["command"].(string); strings.Contains(cmd, "--type qwen") {
+		if cmd, _ := hm["command"].(string); strings.Contains(cmd, "--type qwen ") {
 			return true
 		}
 	}
 	return false
 }
+
+// Qwen Code names its file-editing tools edit and write_file.
+const (
+	qwenPostEditMarker  = "--type qwen-post-edit"
+	qwenPostEditMatcher = "edit|write_file|Edit|Write|MultiEdit"
+)

@@ -213,3 +213,30 @@ func TestUninstallClaudeRemovesBothHooks(t *testing.T) {
 		t.Errorf("SessionStart entries after uninstall = %v, want none", starts)
 	}
 }
+
+func TestInstallClaudeRegistersPostEditSyncAndUninstalls(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	if _, err := InstallClaude(settingsPath, "myproject", 5, 45); err != nil {
+		t.Fatalf("InstallClaude: %v", err)
+	}
+
+	post := readHookCommands(t, settingsPath, "PostToolUse")
+	if len(post) != 1 || post[0] != `nav hook run myproject --type claude-post-edit` {
+		t.Fatalf("PostToolUse commands = %v", post)
+	}
+	data, _ := os.ReadFile(settingsPath)
+	if !strings.Contains(string(data), `"matcher": "Edit|Write|MultiEdit|NotebookEdit"`) {
+		t.Errorf("PostToolUse matcher missing in %s", data)
+	}
+
+	if installed, _ := InstallClaude(settingsPath, "myproject", 5, 45); installed {
+		t.Error("second install should be a no-op")
+	}
+
+	if err := UninstallClaude(settingsPath); err != nil {
+		t.Fatalf("UninstallClaude: %v", err)
+	}
+	if left := readHookCommands(t, settingsPath, "PostToolUse"); len(left) != 0 {
+		t.Errorf("PostToolUse after uninstall = %v", left)
+	}
+}

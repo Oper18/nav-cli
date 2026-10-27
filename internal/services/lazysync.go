@@ -199,8 +199,9 @@ func detectChangedFiles(sdb *db.DB, project, repoPath, branch string) (changed, 
 // detectParentBranch finds the already-indexed local branch that branch most
 // likely forked from, so a brand-new branch's first sync can diff against
 // that fork point instead of re-embedding the whole tree. Candidates are
-// restricted to branches with their own nav database (db.Exists) — there's
-// nothing to inherit from a branch nav has never synced.
+// restricted to branches with their own nav database (db.Exists) or points
+// in Qdrant (e.g. indexed by `nav index`, which writes no manifest) —
+// there's nothing to inherit from a branch nav has never indexed.
 //
 // Ranking: for each candidate, compute its merge-base with branch. The
 // candidate whose merge-base commit is most recent wins (the closest shared
@@ -215,13 +216,16 @@ func detectParentBranch(project, repoPath, branch string) (parent, mergeBase str
 		return "", "", false
 	}
 
+	qdrantHas, closeQdrant := qdrantBranchChecker(project)
+	defer closeQdrant()
+
 	var bestTime int64 = -1
 	var bestDist int = -1
 	for _, candidate := range branches {
 		if candidate == "" || candidate == branch {
 			continue
 		}
-		if !db.Exists(project, candidate) {
+		if !db.Exists(project, candidate) && !qdrantHas(candidate) {
 			continue
 		}
 		base, ok := MergeBase(repoPath, candidate, branch)
@@ -825,3 +829,32 @@ func goModuleName(repoPath string) string {
 	}
 	return ""
 }
+
+// qdrantBranchChecker returns a best-effort "branch has points" lookup and
+// its cleanup. It never starts Qdrant; any failure reports false.
+func qdrantBranchChecker(project string) (has func(branch string) bool, closeFn func()) {
+	noop := func(string) bool { return false }
+	cfg, err := config.Load()
+	if err != nil {
+		return noop, func() {}
+	}
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		return noop, func() {}
+	}
+	client, err := db.NewClient(cfg.Qdrant.Host, cfg.Qdrant.Port, creds.QdrantAPIKey, cfg.Qdrant.UseTLS)
+	if err != nil {
+		return noop, func() {}
+	}
+	collection := "nav_" + project
+	has = func(branch string) bool {
+		ctx, cancel := context.WithTimeout(context.Background(), qdrantBranchCheckTimeout)
+		defer cancel()
+		ok, err := client.BranchHasPoints(ctx, collection, branch)
+		return err == nil && ok
+	}
+	return has, func() { client.Close() }
+}
+
+// qdrantBranchCheckTimeout keeps an unreachable Qdrant from stalling a hook.
+const qdrantBranchCheckTimeout = 2 * time.Second

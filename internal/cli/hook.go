@@ -309,7 +309,7 @@ var hookRunCmd = &cobra.Command{
 }
 
 func init() {
-	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git", "git-post-merge", "claude", "claude-session-start", "qwen", "cursor", "cursor-session-start", or "opencode" (required)`)
+	hookRunCmd.Flags().StringVar(&hookRunType, "type", "", `Hook type: "git", "git-post-merge", "claude", "claude-session-start", "claude-post-edit", "qwen", "qwen-post-edit", "cursor", "cursor-session-start", "cursor-post-edit", "cursor-pre-prompt", "opencode", "opencode-post-edit", or "opencode-pre-prompt" (required)`)
 	hookRunCmd.Flags().StringVar(&hookRunPath, "path", ".", "Repository path (for git hooks)")
 	hookRunCmd.Flags().IntVar(&hookRunTop, "top", 5, "Number of results to inject (for claude, qwen, cursor, and opencode hooks)")
 	hookRunCmd.Flags().StringVar(&hookRunQuery, "query", "", "Query text (for claude, qwen, cursor, and opencode hooks)")
@@ -348,6 +348,20 @@ func runHookRun(cmd *cobra.Command, args []string) error {
 		}
 		return runHookRunClaudeSessionStart(project, path)
 
+	case "cursor-pre-prompt", "opencode-pre-prompt":
+		project, path, err := services.ResolveProject(args, hookRunPath)
+		if err != nil {
+			return err
+		}
+		return runHookRunPrePromptSync(project, path, hookRunType)
+
+	case "claude-post-edit", "qwen-post-edit", "cursor-post-edit", "opencode-post-edit":
+		project, path, err := services.ResolveProject(args, hookRunPath)
+		if err != nil {
+			return err
+		}
+		return runHookRunClaudePostEdit(project, path)
+
 	case "qwen":
 		project, path, err := services.ResolveProject(args, hookRunPath)
 		if err != nil {
@@ -377,7 +391,7 @@ func runHookRun(cmd *cobra.Command, args []string) error {
 		return runHookRunOpenCode(project, path, hookRunQuery, hookRunTop)
 
 	default:
-		return fmt.Errorf("unknown hook type %q; must be \"git\", \"git-post-merge\", \"claude\", \"claude-session-start\", \"qwen\", \"cursor\", \"cursor-session-start\", or \"opencode\"", hookRunType)
+		return fmt.Errorf("unknown hook type %q; must be \"git\", \"git-post-merge\", \"claude\", \"claude-session-start\", \"claude-post-edit\", \"qwen\", \"qwen-post-edit\", \"cursor\", \"cursor-session-start\", \"cursor-post-edit\", \"cursor-pre-prompt\", \"opencode\", \"opencode-post-edit\", or \"opencode-pre-prompt\"", hookRunType)
 	}
 }
 
@@ -499,6 +513,7 @@ const (
 // "nothing to inject" case.
 func runHookRunAssistant(project, path, query string, topK int, minScore float64, maxTokens int, format hookOutputFormat) error {
 	if query == "" {
+		services.SyncBeforeSearch(context.Background(), project, path)
 		return nil
 	}
 	results, err := services.HookSearch(context.Background(), project, path, query, topK, minScore)
@@ -554,4 +569,22 @@ func runHookRunOpenCode(project, path, query string, topK int) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 	return runHookRunAssistant(project, path, query, topK, cfg.Hooks.OpenCodeMinScore, cfg.Hooks.OpenCodeMaxTokens, hookOutputPlain)
+}
+
+// runHookRunClaudePostEdit syncs after any agent applies an edit. Output
+// stays on stderr, so stdout carries nothing into the transcript.
+func runHookRunClaudePostEdit(project, path string) error {
+	services.SyncBeforeSearch(context.Background(), project, path)
+	return nil
+}
+
+// runHookRunPrePromptSync syncs right before a prompt reaches the model, so
+// manual edits are indexed first. Cursor's beforeSubmitPrompt needs a JSON
+// reply to let the prompt through; nothing else may reach stdout.
+func runHookRunPrePromptSync(project, path, hookType string) error {
+	services.SyncBeforeSearch(context.Background(), project, path)
+	if hookType == "cursor-pre-prompt" {
+		fmt.Println(`{"continue": true}`)
+	}
+	return nil
 }
