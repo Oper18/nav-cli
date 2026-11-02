@@ -49,11 +49,17 @@ func HeadCommit(repoPath string) string {
 	return strings.TrimSpace(out)
 }
 
-// GitStatusFiles runs `git status --porcelain -uall` and splits the result
-// into changed (added/modified/untracked/renamed-to) and deleted
-// (removed/renamed-from) paths, relative to repoPath.
+// GitStatusFiles runs `git status --porcelain` and splits the result into
+// changed (added/modified/renamed-to) and deleted (removed/renamed-from)
+// paths, relative to repoPath. Once the repo has a commit only tracked files
+// are reported; a repo without commits also reports untracked files, since
+// nothing is under the index yet.
 func GitStatusFiles(repoPath string) (changed, deleted []string, err error) {
-	out, err := RunGitCmd(repoPath, "status", "--porcelain", "-uall")
+	untracked := "-uall"
+	if HeadCommit(repoPath) != "" {
+		untracked = "-uno"
+	}
+	out, err := RunGitCmd(repoPath, "status", "--porcelain", untracked)
 	if err != nil {
 		return nil, nil, err
 	}

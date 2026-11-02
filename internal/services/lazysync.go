@@ -473,7 +473,15 @@ func syncFiles(ctx context.Context, sdb *db.DB, project, repoPath, branch string
 		}
 	}
 
-	if len(diff.dirty) > 0 {
+	reusedPoints, nReused := reuseEmbeddings(ctx, qdrantClient, collection, project, repoPath, branch, &diff)
+	if len(reusedPoints) > 0 {
+		if err := qdrantClient.Upsert(ctx, collection, reusedPoints); err != nil {
+			return LazySyncResult{}, fmt.Errorf("upserting reused points: %w", err)
+		}
+	}
+	fresh := diff.dirty[nReused:]
+
+	if len(fresh) > 0 {
 		llmClient := llm.NewClientWithEmbedTimeout(creds.OpenRouterAPIKey, cfg.LLM.Model, cfg.LLM.FallbackModels,
 			time.Duration(cfg.LLM.RequestTimeout)*time.Second,
 			time.Duration(cfg.Embedding.RequestTimeout)*time.Second,
@@ -486,11 +494,12 @@ func syncFiles(ctx context.Context, sdb *db.DB, project, repoPath, branch string
 		}
 		readmeContext := capRunes(readme, readmeContextCap)
 
-		points, err = embedAndUpsertSymbols(ctx, cfg, llmClient, qdrantClient, collection, readmeContext, cfg.Indexing.Concurrency, diff.dirty)
+		points, err = embedAndUpsertSymbols(ctx, cfg, llmClient, qdrantClient, collection, readmeContext, cfg.Indexing.Concurrency, fresh)
 		if err != nil {
 			return LazySyncResult{}, err
 		}
 	}
+	points = append(reusedPoints, points...)
 
 	// Reconcile chunk counts: a re-embedded symbol may now span a different
 	// number of chunks than before, so any of its old chunk ids missing from
@@ -581,7 +590,7 @@ func syncFiles(ctx context.Context, sdb *db.DB, project, repoPath, branch string
 		return LazySyncResult{}, fmt.Errorf("committing sync: %w", err)
 	}
 
-	return LazySyncResult{ChunksEmbedded: len(points), ChunksRemoved: len(deleteIDs)}, nil
+	return LazySyncResult{ChunksEmbedded: len(points) - len(reusedPoints), ChunksRemoved: len(deleteIDs)}, nil
 }
 
 func hasAnyOldChunks(diff symbolDiff) bool {

@@ -136,3 +136,31 @@ func TestIndexSpecificFilesDiscoveryPrefersGitTrackedFiles(t *testing.T) {
 		t.Fatal("walkRepoFiles should still surface vendor files (patterns filter them downstream, not the walk)")
 	}
 }
+
+func TestGitStatusFilesSkipsUntrackedOnceRepoHasCommits(t *testing.T) {
+	repo := initTestGitRepo(t,
+		map[string]string{"main.go": "package main\n"},
+		map[string]string{"scratch.py": "x = 1\n"},
+	)
+	mustWriteFile(t, filepath.Join(repo, "main.go"), "package main\n// edited\n")
+
+	changed, _, err := GitStatusFiles(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != 1 || changed[0] != "main.go" {
+		t.Errorf("changed = %v, want [main.go]", changed)
+	}
+}
+
+func TestGitStatusFilesIncludesUntrackedInEmptyRepo(t *testing.T) {
+	repo := initTestGitRepo(t, nil, map[string]string{"app.py": "x = 1\n"})
+
+	changed, _, err := GitStatusFiles(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != 1 || changed[0] != "app.py" {
+		t.Errorf("changed = %v, want [app.py]", changed)
+	}
+}

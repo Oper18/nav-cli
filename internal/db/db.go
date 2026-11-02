@@ -82,3 +82,8 @@ func (c *Client) CollectionPointsCount(ctx context.Context, name string) (int64,
 func (c *Client) BranchHasPoints(ctx context.Context, collection, branch string) (bool, error) {
 	return c.Qdrant.BranchHasPoints(ctx, collection, branch)
 }
+
+// Retrieve returns the stored points (vector and payload) for ids, keyed by id.
+func (c *Client) Retrieve(ctx context.Context, collection string, ids []string) (map[string]qdrant.Point, error) {
+	return c.Qdrant.Retrieve(ctx, collection, ids)
+}

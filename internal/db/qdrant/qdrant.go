@@ -523,3 +523,44 @@ func (c *Client) BranchHasPoints(ctx context.Context, collection, branch string)
 	}
 	return n > 0, nil
 }
+
+// Retrieve fetches the points with the given nav point IDs, including their
+// vectors and payloads. IDs with no stored point are simply absent from the
+// result.
+func (c *Client) Retrieve(ctx context.Context, collection string, ids []string) (map[string]Point, error) {
+	if len(ids) == 0 {
+		return map[string]Point{}, nil
+	}
+
+	pointIDs := make([]*sdk.PointId, len(ids))
+	uuidToID := make(map[string]string, len(ids))
+	for i, id := range ids {
+		pid := toPointID(id)
+		pointIDs[i] = pid
+		uuidToID[pid.GetUuid()] = id
+	}
+
+	got, err := c.sdk.Get(ctx, &sdk.GetPoints{
+		CollectionName: collection,
+		Ids:            pointIDs,
+		WithPayload:    sdk.NewWithPayload(true),
+		WithVectors:    sdk.NewWithVectors(true),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retrieving points from %q: %w", collection, err)
+	}
+
+	out := make(map[string]Point, len(got))
+	for _, p := range got {
+		id, ok := uuidToID[p.GetId().GetUuid()]
+		if !ok {
+			continue
+		}
+		out[id] = Point{
+			ID:      id,
+			Vector:  p.GetVectors().GetVector().GetData(),
+			Payload: payloadFromValueMap(p.GetPayload()),
+		}
+	}
+	return out, nil
+}
