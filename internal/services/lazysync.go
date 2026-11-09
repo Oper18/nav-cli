@@ -487,6 +487,7 @@ func syncFiles(ctx context.Context, sdb *db.DB, project, repoPath, branch string
 			time.Duration(cfg.Embedding.RequestTimeout)*time.Second,
 			time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
 		llmClient.SetEmbedDimensions(cfg.Embedding.Dimension)
+		llmClient.SetEmbedProviders(cfg.Embedding.ProviderOnly)
 
 		readme, readmeErr := config.ReadProjectReadme(project)
 		if readmeErr != nil {

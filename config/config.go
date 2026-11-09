@@ -47,6 +47,10 @@ type EmbeddingConfig struct {
 	MaxTokens int `mapstructure:"max_tokens" yaml:"max_tokens"`
 	// RequestTimeout bounds an embedding request in seconds. Defaults to 120s.
 	RequestTimeout int `mapstructure:"request_timeout" yaml:"request_timeout"`
+	// ProviderOnly restricts OpenRouter to these upstream providers (slugs
+	// such as "deepinfra"), tried in the listed order. Empty lets OpenRouter
+	// route freely, which can land on a provider with a tight token quota.
+	ProviderOnly []string `mapstructure:"provider_only" yaml:"provider_only"`
 }
 
 // SearchConfig holds settings that control the `nav search` command.

@@ -33,6 +33,8 @@ type Client struct {
 	// embedDimensions, when positive, is sent as the embeddings "dimensions"
 	// parameter so Matryoshka models return vectors of that size.
 	embedDimensions int
+	// embedProviders, when non-empty, pins embeddings to these OpenRouter providers.
+	embedProviders []string
 }
 
 // NewClientWithEmbedTimeout creates a new Client using the given API key and models.
@@ -265,4 +267,10 @@ func (c *Client) SummariseBatch(ctx context.Context, reqs []SummariseRequest, co
 // the model's native size.
 func (c *Client) SetEmbedDimensions(n int) {
 	c.embedDimensions = n
+}
+
+// SetEmbedProviders pins Embed to the given OpenRouter provider slugs, tried
+// in order; an empty list leaves routing to OpenRouter.
+func (c *Client) SetEmbedProviders(providers []string) {
+	c.embedProviders = providers
 }

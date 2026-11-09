@@ -221,6 +221,7 @@ func IndexSpecificFiles(
 		time.Duration(cfg.Embedding.RequestTimeout)*time.Second,
 		time.Duration(cfg.LLM.ReadmeTimeout)*time.Second)
 	llmClient.SetEmbedDimensions(cfg.Embedding.Dimension)
+	llmClient.SetEmbedProviders(cfg.Embedding.ProviderOnly)
 
 	// 6b. Establish the project README *before* summarising, so each symbol
 	// summary can be grounded in the project's overall purpose. A full index

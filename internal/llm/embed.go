@@ -6,16 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
+	"strconv"
 	"time"
 )
 
-// embedRateLimitDelay is how long Embed waits before retrying after the
-// embeddings endpoint responds with HTTP 429 (rate limit exceeded). Free-tier
-// OpenRouter rate limits reset per minute, so this comfortably clears the
-// window before the next attempt.
+// embedRateLimitDelay caps how long Embed waits between retries after the
+// embeddings endpoint responds with HTTP 429 (rate limit exceeded).
 const embedRateLimitDelay = 2 * time.Minute
 
 // embedRequest is the OpenRouter embeddings request body.
@@ -23,6 +24,13 @@ type embedRequest struct {
 	Model      string   `json:"model"`
 	Input      []string `json:"input"`
 	Dimensions int      `json:"dimensions,omitempty"`
+	// Provider carries OpenRouter's routing preferences.
+	Provider *embedProvider `json:"provider,omitempty"`
+}
+
+type embedProvider struct {
+	Order []string `json:"order"`
+	Only  []string `json:"only"`
 }
 
 // embedResponse is the OpenRouter embeddings response body.
@@ -60,20 +68,25 @@ func (c *Client) EmbedQuery(ctx context.Context, model, instruction string, quer
 // runs can be long-lived and the free-tier per-minute limit is transient; a
 // cancelled or deadline-exceeded ctx still aborts the wait immediately.
 func (c *Client) Embed(ctx context.Context, model string, texts []string) ([][]float32, error) {
-	body, err := json.Marshal(embedRequest{Model: model, Input: texts, Dimensions: c.embedDimensions})
+	req := embedRequest{Model: model, Input: texts, Dimensions: c.embedDimensions}
+	if len(c.embedProviders) > 0 {
+		req.Provider = &embedProvider{Order: c.embedProviders, Only: c.embedProviders}
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal embed request: %w", err)
 	}
 
-	for {
+	for attempt := 0; ; attempt++ {
 		out, rateLimited, err := c.doEmbed(ctx, body)
 		if !rateLimited {
 			return out, err
 		}
 
-		fmt.Fprintf(os.Stderr, "\nembed: rate limited (429), waiting %s before retrying...\n", embedRateLimitDelay)
+		delay := embedRetryDelay(err, attempt)
+		fmt.Fprintf(os.Stderr, "\nembed: rate limited (429): %.500v; waiting %s before retrying...\n", err, delay.Round(100*time.Millisecond))
 		select {
-		case <-time.After(embedRateLimitDelay):
+		case <-time.After(delay):
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -131,4 +144,28 @@ func (c *Client) doEmbed(ctx context.Context, body []byte) ([][]float32, bool, e
 		out[i] = d.Embedding
 	}
 	return out, false, nil
+}
+
+var retryAfterRe = regexp.MustCompile(`(?i)retry[^.]{0,30}?after\s+(\d+)\s*s`)
+
+// embedRetryDelay picks the wait before retry number attempt: the longer of
+// the provider's own "retry after N sec" hint and an exponential backoff,
+// capped at embedRateLimitDelay, plus jitter so concurrent batches that
+// failed together do not all retry at the same instant.
+func embedRetryDelay(err error, attempt int) time.Duration {
+	if attempt > 6 {
+		attempt = 6
+	}
+	delay := 3 * time.Second << attempt
+	if m := retryAfterRe.FindStringSubmatch(err.Error()); m != nil {
+		if secs, convErr := strconv.Atoi(m[1]); convErr == nil {
+			if hint := time.Duration(secs) * time.Second; hint > delay {
+				delay = hint
+			}
+		}
+	}
+	if delay > embedRateLimitDelay {
+		delay = embedRateLimitDelay
+	}
+	return delay + time.Duration(rand.Int63n(int64(delay)/4+1))
 }
